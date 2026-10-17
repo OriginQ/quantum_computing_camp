@@ -127,7 +127,7 @@ quantum_computing_camp/
 
 ## 3. 配置 AI 编程助手
 
-脚本保留原版 8 个客户端入口：OpenCode、Claude Code、Codex、Gemini CLI、CodeBuddy Code、Cline CLI、Codewhale、ZCode Agent。支持项目级的默认写入当前仓库；Cline CLI、Codewhale 的 MCP 使用用户级配置，需显式加 `--user`。
+脚本保留原版 8 个客户端入口：OpenCode、Claude Code、Codex、Gemini CLI、CodeBuddy Code、Cline CLI、Codewhale、ZCode Agent。支持项目级的默认写入当前仓库；**本脚本**目前对 Cline CLI、Codewhale 仅提供用户级配置，需显式加 `--user`，这不表示客户端本身只能使用用户级配置。
 
 ### 3.1 准备 MCP 密钥
 
@@ -150,13 +150,13 @@ quantum_computing_camp/
 
 | 客户端／脚本参数 | MCP 配置位置 | Skill 位置 | 备注 |
 |---|---|---|---|
-| [OpenCode](https://opencode.ai/docs/config/)／`opencode` | `opencode.jsonc`，兼容已有 `opencode.json` | `.opencode/skills/qpanda3-programming/` | 项目级；优先使用已有 JSONC，其次 JSON |
+| [OpenCode](https://opencode.ai/docs/config/)／`opencode` | `opencode.jsonc`，兼容已有 `opencode.json` | `.opencode/skills/qpanda3-programming/` | 项目级；同时处理本项目 `.opencode/` 内配置中的同名服务 |
 | [Claude Code](https://code.claude.com/docs/en/mcp)／`claude` | `.mcp.json` | `.claude/skills/qpanda3-programming/` | 项目级；首次确认项目 MCP |
 | [Codex](https://developers.openai.com/codex/mcp/)／`codex` | `.codex/config.toml` | `.agents/skills/qpanda3-programming/` | 项目级；需信任项目 |
 | [Gemini CLI](https://geminicli.com/docs/tools/mcp-server/)／`gemini` | `.gemini/settings.json` | `.gemini/skills/qpanda3-programming/` | 项目级；使用 Streamable HTTP 的 `httpUrl` |
 | [CodeBuddy Code](https://www.codebuddy.ai/docs/cli/codebuddy-dir)／`codebuddy` | `.mcp.json`，兼容已有 `mcp.json` | `.codebuddy/skills/qpanda3-programming/` | 项目级；与 Claude 可能共用 MCP 文件 |
 | [Cline CLI](https://docs.cline.bot/mcp/mcp-overview)／`cline` | `~/.cline/data/settings/cline_mcp_settings.json` | `~/.cline/skills/qpanda3-programming/` | 使用 `--user`；IDE 扩展通过其 MCP 设置面板导入 |
-| [Codewhale](https://codewhale.net/en/docs/mcp)／`codewhale` | `~/.codewhale/mcp.json` | `~/.codewhale/skills/qpanda3-programming/` | 终端 AI 编程客户端；使用 `--user` |
+| [Codewhale](https://codewhale.net/en/docs/mcp)／`codewhale` | `~/.codewhale/mcp.json` | `~/.codewhale/skills/qpanda3-programming/` | 本脚本需 `--user`；默认路径不存在时保留已有 `.deepseek/` 回退 |
 | [ZCode Agent](https://zcode.z.ai/cn/docs/mcp-services)／`zcode` | `.zcode/config.json` | `.zcode/skills/qpanda3-programming/` | 项目级；用户级可显式使用 `--user` |
 
 ### 3.4 配置命令与检查
@@ -196,7 +196,16 @@ Claude Code、Codex、Gemini CLI 可在交互会话用 `/mcp` 查看连接；Cod
 ## 4. 按需查阅
 
 <details>
-<summary>macOS / Linux 安装环境</summary>
+<summary>平台支持与 macOS / Linux 安装环境</summary>
+
+截至 2026-10-17，[PyPI 当前 pyqpanda3 0.5.0 的发行文件](https://pypi.org/project/pyqpanda3/0.5.0/#files)对 CPython 3.14 提供以下 wheel；这表示发行包覆盖，不代表已在全部平台实测。安装命令仍默认获取兼容的最新稳定版。
+
+| 平台 | Python 3.14 wheel |
+|---|---|
+| Windows x86-64 | 有 |
+| Linux x86-64（glibc） | 有 |
+| macOS 13+ Apple Silicon（arm64） | 有 |
+| macOS Intel、Linux arm64／musl、Windows arm64 | 当前发行版未提供，也无源码包；不能直接套用此安装流程 |
 
 在 Bash/Zsh 中安装 uv，重开终端并进入仓库后，运行相同的 Python 安装和依赖同步命令：
 
@@ -219,9 +228,23 @@ uv sync --upgrade-package pyqpanda3
 uv run --locked python scripts/prepare_qpanda3_ai_kits.py --help
 ```
 
-默认项目级配置；其他目录可加 `--project-dir '实际路径'`，用户级配置需显式加 `--user`。`list` 可查看全部入口及作用域。重新配置保留其他服务的设置值，原有注释和排版不保留；旧路径的历史配置不自动删除。
+默认项目级配置；其他目录可加 `--project-dir '实际路径'`，用户级配置需显式加 `--user`。`list` 可查看全部入口及作用域。重新配置保留其他服务，以及同名服务的启停、超时和工具过滤设置；更新连接地址及认证字段，原有注释和排版不保留。Skill 更新会替换整个对应目录，个人文件请放在其他目录。
 
-脚本基于本源量子的[原始脚本](https://show.originqc.com.cn/prod/qcloudai/qpanda3-skill_MCP/prepare_qpanda3_ai_kits.py)改进。默认下载的 `qpanda3-programming` 分发包与 GitHub 仓库 `pyqpanda3-skill` 名称不同，内容不一定与 GitHub 当前版本完全一致。
+`-k` 也支持本地 JSON 配置文件，可同时指定 MCP 配置和自定义 Skill 地址。
+
+升级或卸载时留意：
+
+- 相比原版，默认作用域改为项目级，项目根取当前目录或 `--project-dir`，不再取脚本目录。以前的用户级配置和旧 `.codex/skills/` 不自动迁移或删除；Codex 当前使用 `.agents/skills/`。显式指定客户端可预先生成配置，无需通过自动检测；卸载必须指定单个客户端，不再批量跨作用域清理。
+- OpenCode 会同步更新本作用域兼容文件里已有的同名服务；ZCode 首次写入原生 MCP 时会保留原先有效的 `.agents/mcp.json` 服务；Claude 新建 `.mcp.json` 时保留 CodeBuddy 原 `mcp.json` 中的服务。Codewhale 不要求或改写 `constitution.json`。
+- `uninstall 客户端参数` 只清理所选作用域兼容配置中的 `qpanda3-runtime` 和默认 Skill `qpanda3-programming`，自定义名称需手动处理。Claude 和 CodeBuddy 共用 `.mcp.json` 时，删除 MCP 会同时影响两者；加 `--skill-only` 可只卸载该客户端的默认 Skill。
+- 检测到不支持的配置根覆盖（如 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`GEMINI_CLI_HOME`、`XDG_CONFIG_HOME`、`OPENCODE_CONFIG*`、`CLINE_*`、`CODEWHALE_HOME`）时，脚本会明确拒绝，请按客户端说明手动配置；CLI 单次覆盖或组织策略仍需在客户端核查。配置或 Skill 经过符号链接／目录联接时也需手动处理。
+- 使用 `--api-key-env` 时，Claude、Codex、CodeBuddy 可引用环境变量；CodeBuddy 变量名必须匹配 `[A-Z_][A-Z0-9_]*`。本地 JSON 输入、自定义 Skill 路径或其他仓库不会自动获得本仓库的忽略保护，含密钥的输入建议放 `.tmp/`。
+
+下载、解压和恢复备份存于仓库 `.tmp/`。配置先完整序列化，再用同目录的短期临时文件原子替换，以支持跨盘用户配置；Skill 复制或配置写入报错时尝试恢复旧内容。若恢复也失败，脚本会输出保留在 `.tmp/` 的恢复路径；Skill 复制不保证断电时的原子性。
+
+脚本基于本源量子的[原始脚本](https://show.originqc.com.cn/prod/qcloudai/qpanda3-skill_MCP/prepare_qpanda3_ai_kits.py)改进。默认下载的 `qpanda3-programming` 分发包与 GitHub 仓库 `pyqpanda3-skill` 独立更新，不能假定两者逐文件一致。
+
+Skill 的兼容基线以所下载包的 `SKILL.md` 与版本说明为准；本仓库的本地线路测试不能证明全部参考 API 与最新包一致。ZIP 会检查 CRC、路径和解压规模，但这不等同于来源认证或固定版本校验。
 
 </details>
 

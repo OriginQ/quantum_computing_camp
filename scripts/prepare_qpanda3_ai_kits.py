@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "pyqpanda3",
-#     "commentjson>=0.9.0",
+#     "json5>=0.17.3",
 #     "tomli-w>=1.2.0",
 # ]
 # ///
@@ -16,11 +16,12 @@ environment-backed credentials and scope-limited uninstall.
 """
 
 import atexit
+from contextlib import contextmanager
+from copy import deepcopy
 import json as stdjson
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -29,7 +30,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-import commentjson
+import json5
 import tomli_w
 import tomllib
 
@@ -119,7 +120,7 @@ def wrap_mcp_entry(tool: str, entry: dict) -> dict:
         servers = {}
         for name, cfg in entry.items():
             servers[name] = dict(cfg)
-            servers[name].setdefault("type", "remote")
+            servers[name]["type"] = "remote"
         return {"mcp": servers}
     elif tool in ("claude", "codebuddy"):
         servers = {}
@@ -217,14 +218,19 @@ def check_tool_usable(tool: str, scope: str) -> bool:
             "Cline CLI MCP uses user-level configuration. Use 'prepare cline -k KEY --user'."
         )
         return False
+    try:
+        check_config_overrides(tool)
+    except ValueError:
+        return False
     if tool == "codewhale" and scope == "project":
         log_error(
-            "Codewhale MCP uses user-level configuration. Use 'prepare codewhale -k KEY --user'."
+            "This script currently supports Codewhale with --user only. Use 'prepare codewhale -k KEY --user'."
         )
         return False
     if scope == "project":
         cmd = TOOL_COMMANDS.get(tool)
         if cmd and shutil.which(cmd):
+            log_info(f"Detected {tool} by PATH; this does not verify MCP connectivity")
             return True
         log_warn(
             f"{SUPPORTED_TOOLS[tool]['name']} command not found in PATH ({cmd}), skipped"
@@ -233,6 +239,7 @@ def check_tool_usable(tool: str, scope: str) -> bool:
     paths = USER_CONFIG_DIRS.get(tool, [])
     for p in paths:
         if os.path.exists(os.path.expanduser(p)):
+            log_info(f"Detected {tool} by default user configuration directory")
             return True
     log_warn(
         f"{SUPPORTED_TOOLS[tool]['name']} not detected ({', '.join(USER_CONFIG_DIRS.get(tool, []))}), skipped"
@@ -279,7 +286,9 @@ def shared_download_zip(url):
     TMP_ZIP = tmp.name
     TMP_ZIPS.append(TMP_ZIP)
     tmp.close()
-    log_info(f"Downloading: {url}")
+    parsed = urlparse(url)
+    # Signed queries, fragments and userinfo must never enter logs.
+    log_info(f"Downloading Skill from: {parsed.hostname or '(invalid host)'}")
     try:
         with urllib.request.urlopen(url, timeout=30) as response, open(TMP_ZIP, "wb") as output:
             shutil.copyfileobj(response, output)
@@ -291,6 +300,8 @@ def shared_download_zip(url):
     log_ok("Download complete")
     shared_validate_zip(TMP_ZIP)
     SKILL_NAME = os.path.splitext(os.path.basename(urlparse(url).path))[0]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", SKILL_NAME):
+        raise ValueError("Skill ZIP needs a safe basename")
     SKILL_ZIP_PATH = TMP_ZIP
     return SKILL_NAME
 
@@ -305,14 +316,22 @@ def shared_use_local_zip(path):
 def shared_validate_zip(zp):
     try:
         with zipfile.ZipFile(zp) as z:
+            if len(z.infolist()) > 10000 or sum(i.file_size for i in z.infolist()) > 256 * 1024 * 1024:
+                raise ValueError("Skill archive exceeds extraction limits")
             r = z.testzip()
             if r:
                 log_error(f"Corrupt ZIP: {r}")
                 sys.exit(1)
-            for name in z.namelist():
+            for info in z.infolist():
+                # ZipInfo normalizes separators on Windows; validate the raw name too.
+                name = info.orig_filename
                 parts = Path(name.replace("\\", "/")).parts
                 if ".." in parts or name.startswith(("/", "\\")) or ":" in name:
                     raise ValueError("Unsafe archive path")
+                if "\\" in name:
+                    raise ValueError("Archive paths must use forward slashes")
+            if any((i.external_attr >> 16) & 0o170000 == 0o120000 for i in z.infolist()):
+                raise ValueError("Linked archive entries are not supported")
             if not any(name == "SKILL.md" or name.endswith("/SKILL.md") for name in z.namelist()):
                 raise ValueError("Skill archive contains no SKILL.md")
     except Exception as e:
@@ -322,55 +341,50 @@ def shared_validate_zip(zp):
     log_ok(f"Valid ZIP ({s // 1024}K)" if s >= 1024 else f"Valid ZIP ({s}B)")
 
 
-def shared_extract_and_install(zip_path, target, desc):
-    global TMP_DIR
-    os.makedirs(target, exist_ok=True)
+@contextmanager
+def installed_skill(zip_path, target, root):
+    """Validate a fresh tree, replace the managed directory, restore on failure.
+
+    Extraction and backups stay in repository .tmp, including for user-level
+    installs on another volume. Copying a Skill is not a crash-atomic operation.
+    """
+    guard_path(target, root)
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    td = tempfile.mkdtemp(prefix="_skill_extract.", dir=TMP_ROOT)
-    TMP_DIR = td
-    try:
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(td)
-        _items = os.listdir(td)
-        if len(_items) == 1 and os.path.isdir(os.path.join(td, _items[0])):
-            _inner = os.path.join(td, _items[0])
-            for _item in os.listdir(_inner):
-                shutil.move(os.path.join(_inner, _item), os.path.join(td, _item))
-            os.rmdir(_inner)
-        if shutil.which("rsync"):
-            subprocess.run(
-                [
-                    "rsync",
-                    "-a",
-                    "--exclude=build_index.py",
-                    "--exclude=verify_sync.py",
-                    f"{td}/",
-                    f"{target}/",
-                ],
-                check=True,
-            )
-        else:
-            for item in os.listdir(td):
-                s = os.path.join(td, item)
-                d = os.path.join(target, item)
-                if item in ("build_index.py", "verify_sync.py"):
-                    continue
-                if os.path.isdir(s):
-                    shutil.copytree(
-                        s,
-                        d,
-                        ignore=shutil.ignore_patterns(
-                            "build_index.py", "verify_sync.py"
-                        ),
-                        dirs_exist_ok=True,
-                    )
-                else:
-                    shutil.copy2(s, d)
-        log_ok(f"Installed: {desc}")
-    finally:
-        if os.path.isdir(td):
-            shutil.rmtree(td, ignore_errors=True)
-            TMP_DIR = None
+    with tempfile.TemporaryDirectory(prefix="_skill_install.", dir=TMP_ROOT) as td:
+        staging = Path(td) / "extract"
+        with zipfile.ZipFile(zip_path) as archive:
+            archive.extractall(staging)
+        items = list(staging.iterdir())
+        source = items[0] if len(items) == 1 and items[0].is_dir() else staging
+        if not (source / "SKILL.md").is_file():
+            raise ValueError("New Skill must contain a root SKILL.md (at most one wrapper directory)")
+        previous = Path(td) / "previous"
+        existed = target.exists()
+        if existed:
+            if not target.is_dir():
+                raise ValueError("Skill destination must be a directory")
+            shutil.copytree(target, previous, symlinks=True)
+        try:
+            guard_path(target, root)
+            if existed:
+                shutil.rmtree(target)
+            shutil.copytree(source, target, ignore=shutil.ignore_patterns("build_index.py", "verify_sync.py"))
+            yield
+        except BaseException:
+            try:
+                # Do not follow a link introduced while installation was in progress.
+                guard_path(target, root)
+                if target.exists():
+                    shutil.rmtree(target)
+                if existed:
+                    shutil.copytree(previous, target, symlinks=True)
+            except (OSError, ValueError):
+                if existed:
+                    recovery = TMP_ROOT / ("skill-recovery-" + Path(td).name)
+                    shutil.move(previous, recovery)
+                    log_error(f"Skill restore failed; original retained at {recovery}")
+                raise
+            raise
 
 
 def shared_test_connection(url, headers=None, skip_env_vars=False):
@@ -432,6 +446,7 @@ def validate_mcp_entries(entries):
 
 def client_paths(tool, scope):
     """Return the config and skill root in exactly one selected scope."""
+    check_config_overrides(tool)
     root = Path(PROJECT_DIR) if scope == "project" else Path.home()
     if tool in ("claude", "codebuddy"):
         family = "claude" if tool == "claude" else "codebuddy"
@@ -465,7 +480,49 @@ def client_paths(tool, scope):
         "codewhale": (".codewhale/mcp.json", ".codewhale/skills"),
     }
     config, skills = paths[tool]
+    if tool == "codewhale":
+        # Each default state path falls back independently in Codewhale v0.10.1.
+        config = next((p for p in (config, ".deepseek/mcp.json") if (root / p).exists()), config)
+        skills = next((p for p in (skills, ".deepseek/skills") if (root / p).exists()), skills)
+        settings = next((p for p in (root / ".codewhale/config.toml", root / ".deepseek/config.toml") if p.exists()), None)
+        if settings and "mcp_config_path" in load_client_config(settings):
+            log_error("Codewhale mcp_config_path changes the supported layout; configure it manually")
+            raise ValueError("Codewhale mcp_config_path override requires manual configuration")
     return root / config, root / skills
+
+
+def check_config_overrides(tool):
+    """Refuse unsupported alternate roots instead of reporting a false success."""
+    home = Path.home()
+    defaults = {
+        "codex": {"CODEX_HOME": home / ".codex"},
+        "claude": {"CLAUDE_CONFIG_DIR": None},
+        "gemini": {"GEMINI_CLI_HOME": home},
+        "opencode": {"XDG_CONFIG_HOME": home / ".config", "OPENCODE_CONFIG": None,
+                     "OPENCODE_CONFIG_DIR": None, "OPENCODE_CONFIG_CONTENT": None},
+        "cline": {"CLINE_DIR": home / ".cline", "CLINE_DATA_DIR": home / ".cline/data",
+                  "CLINE_MCP_SETTINGS_PATH": home / ".cline/data/settings/cline_mcp_settings.json"},
+        "codewhale": {"CODEWHALE_HOME": None, "CODEWHALE_CONFIG_PATH": None,
+                      "DEEPSEEK_HOME": None, "DEEPSEEK_CONFIG_PATH": None},
+        "codebuddy": {"CODEBUDDY_CONFIG_DIR": home / ".codebuddy"},
+    }
+    for name, default in defaults.get(tool, {}).items():
+        value = os.environ.get(name)
+        if value and (default is None or Path(value).expanduser().resolve() != default.resolve()):
+            log_error(f"{name} changes the configuration layout; use the client's manual configuration")
+            raise ValueError(f"{name} overrides the supported layout; configure this client manually")
+
+
+def guard_path(path, root):
+    """Reject linked files/parents, including Windows junctions, before mutation."""
+    path, root = Path(path).absolute(), Path(root).resolve()
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("Target resolves outside the selected scope")
+    for part in (path, *path.parents):
+        if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+            raise ValueError("Linked configuration/Skill paths require manual configuration")
+        if part == root:
+            break
 
 
 def load_client_config(path):
@@ -477,23 +534,82 @@ def load_client_config(path):
     else:
         text = path.read_text(encoding="utf-8-sig")
         try:
-            data = commentjson.loads(text) if text.strip() else {}
+            data = json5.loads(text, allow_duplicate_keys=False) if text.strip() else {}
         except Exception:
-            # commentjson's parser exception can embed the original source text.
+            # Parser exceptions can embed the original source text.
             raise ValueError("Invalid client JSON configuration") from None
     if not isinstance(data, dict):
         raise ValueError("Client config must be an object")
     return data
 
 
-def write_client_config(path, data):
+def serialize_client_config(path, data):
+    text = tomli_w.dumps(data) if path.suffix == ".toml" else stdjson.dumps(
+        data, indent=2, ensure_ascii=False, allow_nan=False, sort_keys=True
+    ) + "\n"
+    return text.encode("utf-8")
+
+
+def atomic_write(path, content):
+    """Stage next to the destination so os.replace works across drive layouts."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix == ".toml":
-        with path.open("wb") as stream:
-            tomli_w.dump(data, stream)
-    else:
-        path.write_text(stdjson.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    fd, name = tempfile.mkstemp(prefix=".qpanda-config-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists():
+            shutil.copymode(path, name)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def write_client_config(path, data):
+    # Serialize completely before creating directories or opening a target file.
+    atomic_write(path, serialize_client_config(path, data))
     log_ok(f"Written: {path}")
+
+
+def write_config_batch(changes, root, expected=None):
+    prepared = [(path, serialize_client_config(path, data)) for path, data in changes]
+    for path, _ in prepared:
+        guard_path(path, root)
+    if expected is not None:
+        for path, before in expected.items():
+            guard_path(path, root)
+            if (path.read_bytes() if path.exists() else None) != before:
+                raise ValueError("Client configuration changed during prepare; retry after closing the client")
+    originals = {path: path.read_bytes() if path.exists() else None for path, _ in prepared}
+    written = []
+    try:
+        for path, content in prepared:
+            guard_path(path, root)
+            atomic_write(path, content)
+            written.append(path)
+            log_ok(f"Written: {path}")
+    except BaseException:
+        try:
+            for path in reversed(written):
+                guard_path(path, root)
+                if originals[path] is None:
+                    path.unlink()
+                else:
+                    atomic_write(path, originals[path])
+        except (OSError, ValueError):
+            TMP_ROOT.mkdir(parents=True, exist_ok=True)
+            recovery = Path(tempfile.mkdtemp(prefix="config-recovery-", dir=TMP_ROOT))
+            manifest = []
+            for index, (path, content) in enumerate(originals.items()):
+                name = f"{index}{path.suffix}"
+                if content is not None:
+                    (recovery / name).write_bytes(content)
+                manifest.append({"target": str(path), "backup": name if content is not None else None})
+            (recovery / "manifest.json").write_text(stdjson.dumps(manifest, indent=2), encoding="utf-8")
+            log_error(f"Config restore failed; originals retained at {recovery}")
+            raise
+        raise
 
 
 def client_servers(tool, data, create=False):
@@ -506,6 +622,8 @@ def client_servers(tool, data, create=False):
     }.get(tool, ("mcpServers",))
     if tool == "codewhale" and "servers" not in data and "mcpServers" in data:
         keys = ("mcpServers",)
+    if tool == "opencode":
+        return opencode_server_maps(data, create)[0]
     current = data
     for key in keys:
         current = current.setdefault(key, {}) if create else current.get(key, {})
@@ -514,47 +632,185 @@ def client_servers(tool, data, create=False):
     return current
 
 
+def opencode_server_maps(data, create=False):
+    mcp = data.setdefault("mcp", {}) if create else data.get("mcp", {})
+    if not isinstance(mcp, dict):
+        raise ValueError("mcp must be an object")
+    nested = mcp.get("servers")
+    # A remote/local server may itself be named 'servers'.
+    direct = isinstance(nested, dict) and any(k in nested and not isinstance(nested[k], dict) for k in ("type", "enabled"))
+    if isinstance(nested, dict) and not direct:
+        return [nested, mcp]
+    return [mcp]
+
+
+def scope_configs(tool, scope, selected):
+    if tool == "opencode":
+        base = Path(PROJECT_DIR) if scope == "project" else Path.home() / ".config/opencode"
+        candidates = [base / name for name in ("opencode.json", "opencode.jsonc")]
+        if scope == "project":
+            candidates += [base / ".opencode" / name for name in ("opencode.json", "opencode.jsonc")]
+        return list(dict.fromkeys([selected, *(p for p in candidates if p.exists())]))
+    if tool == "codebuddy":
+        base = Path(PROJECT_DIR) if scope == "project" else Path.home()
+        names = (".mcp.json", "mcp.json") if scope == "project" else (".codebuddy/.mcp.json", ".codebuddy/mcp.json", ".codebuddy.json")
+        return list(dict.fromkeys([selected, *(base / p for p in names if (base / p).exists())]))
+    if tool == "zcode":
+        root = Path(PROJECT_DIR) if scope == "project" else Path.home()
+        fallback = root / ".agents/mcp.json"
+        return [selected, *([fallback] if fallback.exists() else [])]
+    return [selected]
+
+
+def merge_managed_entry(old, new):
+    if not isinstance(old, dict):
+        raise ValueError("Existing same-name MCP entry must be an object")
+    result = deepcopy(old)
+    # Replace connection/authentication fields; preserve user control settings.
+    for key in ("url", "httpUrl", "type", "transport", "command", "args", "env",
+                "bearer_token_env_var", "oauth", "headers", "http_headers", "env_http_headers"):
+        result.pop(key, None)
+    for key, value in new.items():
+        if key in ("enabled", "disabled", "autoApprove") and key in result:
+            continue
+        result[key] = deepcopy(value)
+    # Unrelated custom headers survive, but stale authentication never does.
+    for field in ("headers", "http_headers", "env_http_headers"):
+        kept = {k: v for k, v in old.get(field, {}).items() if k.lower() not in ("x-api-key", "authorization")}
+        kept.update(new.get(field, {}))
+        if kept:
+            result[field] = kept
+    return result
+
+
+def normalize_opencode_legacy(data):
+    if "mcpServers" not in data:
+        return
+    legacy = data.pop("mcpServers", {})
+    if not isinstance(legacy, dict):
+        raise ValueError("mcpServers must be an object")
+    servers = client_servers("opencode", data, create=True)
+    for name, entry in legacy.items():
+        if name in servers:
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError("Unrecognized legacy OpenCode MCP entry")
+        item = deepcopy(entry)
+        if isinstance(item.get("url"), str):
+            item["type"] = "remote"
+            allowed = {"type", "url", "headers", "enabled", "disabled", "timeout", "oauth"}
+        elif isinstance(item.get("command"), (str, list)):
+            command = item["command"]
+            args = item.pop("args", [])
+            if not isinstance(args, list) or not all(isinstance(v, str) for v in args):
+                raise ValueError("Invalid legacy command args")
+            item["command"] = ([command] if isinstance(command, str) else command) + args
+            if not item["command"] or not all(isinstance(v, str) for v in item["command"]):
+                raise ValueError("Invalid legacy command")
+            item["type"] = "local"
+            if "env" in item:
+                item["environment"] = item.pop("env")
+            allowed = {"type", "command", "environment", "enabled", "disabled", "timeout"}
+        else:
+            raise ValueError("Unrecognized legacy OpenCode MCP entry")
+        if "disabled" in item:
+            item.setdefault("enabled", not item.pop("disabled"))
+        if set(item) - allowed:
+            raise ValueError("Legacy OpenCode MCP has unsupported fields; migrate it manually")
+        servers[name] = item
+
+
 def prepare_client(tool, mcp_cfg, skill_url, scope):
     config, skills = client_paths(tool, scope)
-    data = load_client_config(config)
+    root = Path(PROJECT_DIR) if scope == "project" else Path.home()
+    paths = scope_configs(tool, scope, config)
+    for path in [*paths, skills]:
+        guard_path(path, root)
+    expected = {path: path.read_bytes() if path.exists() else None for path in paths}
+    records = {path: load_client_config(path) for path in paths}
+    data = records[config]
+    if tool == "opencode":
+        for value in records.values():
+            normalize_opencode_legacy(value)
     servers = client_servers(tool, data, create=True)
-    if tool == "opencode" and "mcpServers" in data:
-        legacy = data.pop("mcpServers")
-        if not isinstance(legacy, dict):
-            raise ValueError("mcpServers must be an object")
-        for name, entry in legacy.items():
-            servers.setdefault(name, entry)
-    servers.update(client_servers(tool, wrap_mcp_entry(tool, mcp_cfg)))
-    # Download and validate before changing client configuration.
+    if tool == "zcode" and not servers and len(paths) > 1:
+        fallback = records[paths[1]].get("mcpServers", {})
+        if not isinstance(fallback, dict):
+            raise ValueError("ZCode fallback mcpServers must be an object")
+        servers.update(deepcopy(fallback))
+    if tool == "claude" and scope == "project" and not config.exists():
+        # Creating .mcp.json also changes CodeBuddy's effective project source.
+        fallback = Path(PROJECT_DIR) / "mcp.json"
+        guard_path(fallback, root)
+        if fallback.exists():
+            expected[fallback] = fallback.read_bytes()
+            prior = load_client_config(fallback).get("mcpServers", {})
+            if not isinstance(prior, dict):
+                raise ValueError("CodeBuddy fallback mcpServers must be an object")
+            servers.update(deepcopy(prior))
+    incoming = client_servers(tool, wrap_mcp_entry(tool, mcp_cfg))
+    if tool == "codebuddy":
+        for entry in incoming.values():
+            for value in entry.get("headers", {}).values():
+                for name in re.findall(r"\$\{([^}:]+)(?::-.*?)?\}", value):
+                    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name):
+                        raise ValueError("CodeBuddy header environment variables must be uppercase")
+    changes = []
+    for path, value in records.items():
+        if tool == "zcode" and path != config:
+            continue  # Preserve the shared fallback; native copy now retains its effective services.
+        maps = opencode_server_maps(value) if tool == "opencode" else [client_servers(tool, value)]
+        if len(maps) > 1:
+            for name, new in incoming.items():
+                if name in maps[0] and name in maps[1] and merge_managed_entry(maps[0][name], new) != merge_managed_entry(maps[1][name], new):
+                    raise ValueError("Conflicting OpenCode MCP containers require manual resolution")
+        changed = path == config or (tool == "opencode" and value != load_client_config(path))
+        for mapping in maps:
+            for name, new in incoming.items():
+                if name in mapping or (path == config and mapping is maps[0]):
+                    mapping[name] = merge_managed_entry(mapping.get(name, {}), new)
+                    changed = True
+        if changed:
+            serialize_client_config(path, value)  # Fail before changing the Skill too.
+            changes.append((path, value))
     name = shared_download_zip(skill_url)
     target = skills / name
-    shared_extract_and_install(SKILL_ZIP_PATH, str(target), f"{scope} {target}")
-    if not (target / "SKILL.md").is_file():
-        raise ValueError("Installed Skill has no root SKILL.md")
-    write_client_config(config, data)
+    with installed_skill(SKILL_ZIP_PATH, target, root):
+        write_config_batch(changes, root, expected)
     log_ok(f"Skill files installed: {target}")
     log_info("Configuration written. Restart the client and verify Skill discovery and MCP connection there.")
 
 
-def uninstall_tool(tool, scope):
+def uninstall_tool(tool, scope, skill_only=False):
     config, skills = client_paths(tool, scope)
     target = skills / "qpanda3-programming"
     root = Path(PROJECT_DIR) if scope == "project" else Path.home()
-    # Resolve before any mutation or recursive removal, including Windows junctions.
-    if target.exists():
-        if not target.resolve().is_relative_to(root.resolve()):
-            raise ValueError("Skill target resolves outside the selected scope")
-        if target.is_symlink():
-            raise ValueError("Refusing to recursively uninstall a linked Skill")
-    data = load_client_config(config)
-    servers = client_servers(tool, data)
-    if "qpanda3-runtime" in servers:
-        del servers["qpanda3-runtime"]
-        write_client_config(config, data)
-    else:
-        log_info(f"qpanda3-runtime not found in {config}")
-    if tool == "claude" and scope == "project":
+    guard_path(target, root)
+    changes = []
+    paths = [] if skill_only else scope_configs(tool, scope, config)
+    for path in paths:
+        guard_path(path, root)
+        data = load_client_config(path)
+        if tool == "opencode":
+            maps = [*opencode_server_maps(data), data.get("mcpServers", {})]
+        elif tool == "zcode" and path != config:
+            maps = [data.get("mcpServers", {})]
+        else:
+            maps = [client_servers(tool, data)]
+        changed = False
+        for mapping in maps:
+            if not isinstance(mapping, dict):
+                raise ValueError("MCP server container must be an object")
+            if "qpanda3-runtime" in mapping:
+                del mapping["qpanda3-runtime"]
+                changed = True
+        if changed:
+            changes.append((path, data))
+    if tool in ("claude", "codebuddy") and scope == "project" and not skill_only:
+        log_warn("Removing project MCP also affects clients sharing .mcp.json; use --skill-only to retain MCP")
+    if tool == "claude" and scope == "project" and not skill_only:
         settings = Path(PROJECT_DIR) / ".claude/settings.local.json"
+        guard_path(settings, root)
         if settings.is_file():
             choices = load_client_config(settings)
             changed = False
@@ -564,7 +820,8 @@ def uninstall_tool(tool, scope):
                     choices[key] = [v for v in values if v != "qpanda3-runtime"]
                     changed = True
             if changed:
-                write_client_config(settings, choices)
+                changes.append((settings, choices))
+    write_config_batch(changes, root)
     if target.exists():
         shutil.rmtree(target)
         log_ok(f"Removed: {target}")
@@ -595,6 +852,7 @@ def build_parser():
     scope.add_argument("--user", action="store_const", const="user", dest="scope", help="explicitly use user scope")
     parser.set_defaults(scope="project")
     parser.add_argument("--project-dir", default=os.getcwd(), help="project directory (default: current working directory)")
+    parser.add_argument("--skill-only", action="store_true", help="uninstall only the default Skill, retaining shared MCP configuration")
     return parser
 
 
@@ -602,6 +860,8 @@ def main():
     global PROJECT_DIR
     parser = build_parser()
     args = parser.parse_args()
+    if args.skill_only and args.command != "uninstall":
+        parser.error("--skill-only requires uninstall")
     if args.command == "help":
         parser.print_help()
         return
@@ -621,11 +881,13 @@ def main():
             parser.error(f"{tool} requires --user")
     log_info(f"Scope: {args.scope}; project directory: {PROJECT_DIR}")
     if args.command == "uninstall":
-        uninstall_tool(args.tool, args.scope)
+        uninstall_tool(args.tool, args.scope, args.skill_only)
         return
     if args.api_key_env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.api_key_env):
             parser.error("--api-key-env requires a valid environment variable name")
+        if "codebuddy" in tools and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", args.api_key_env):
+            parser.error("CodeBuddy requires an uppercase environment variable name ([A-Z_][A-Z0-9_]*)")
         if not os.environ.get(args.api_key_env):
             parser.error("The API key environment variable is unset or empty")
         if any(t not in ("claude", "codex", "codebuddy") for t in tools):

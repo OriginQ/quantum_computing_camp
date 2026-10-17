@@ -7,7 +7,7 @@ dependencies = ["pyqpanda3"]
 
 [dependency-groups]
 dev = [
-    "commentjson>=0.9.0",
+    "json5>=0.17.3",
     "tomli-w>=1.2.0",
     "ipykernel>=6.29",
     "jupyterlab>=4.3",

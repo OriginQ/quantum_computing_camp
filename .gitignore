@@ -1,4 +1,5 @@
 *.vs/*
+docs/pdf/*
 
 # Local environments, downloaded skills, credentials and verification artifacts
 .venv/
@@ -17,6 +18,9 @@ mcp.json
 /opencode.jsonc
 /opencode.json
 .opencode/skills/qpanda3-programming/
+.opencode/opencode.jsonc
+.opencode/opencode.json
+.agents/mcp.json
 .gemini/settings.json
 .gemini/skills/qpanda3-programming/
 .zcode/config.json

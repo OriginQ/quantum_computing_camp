@@ -73,11 +73,14 @@ def skill_zip():
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
+    extra_archives = {}
+
     def do_GET(self):
         if self.path == "/missing.zip":
             self.send_error(404)
             return
-        content = skill_zip() if self.path == "/qpanda3-programming.zip" else b"invalid zip"
+        path = self.path.split("?", 1)[0]
+        content = self.extra_archives.get(path, skill_zip() if path == "/qpanda3-programming.zip" else b"invalid zip")
         self.send_response(200)
         self.end_headers()
         self.wfile.write(content)
@@ -113,9 +116,18 @@ class SetupTests(unittest.TestCase):
             "QPANDA3_TEST_KEY": "fixture-secret-not-a-real-key",
         })
         self.env.start()
+        # Keep the fixture independent of the developer's real client roots.
+        self.overrides = patch.dict(os.environ, {name: "" for name in (
+            "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME", "XDG_CONFIG_HOME",
+            "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT",
+            "CLINE_DIR", "CLINE_DATA_DIR", "CLINE_MCP_SETTINGS_PATH", "CODEBUDDY_CONFIG_DIR",
+            "CODEWHALE_HOME", "CODEWHALE_CONFIG_PATH", "DEEPSEEK_HOME", "DEEPSEEK_CONFIG_PATH",
+        )})
+        self.overrides.start()
 
     def tearDown(self):
         kit.cleanup()
+        self.overrides.stop()
         self.env.stop()
         self.temp.cleanup()
 
@@ -384,7 +396,7 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(config.read_bytes(), before)
                 self.assertFalse((skills / "qpanda3-programming").exists())
 
-    def test_opencode_updates_existing_json_or_jsonc_and_keeps_history(self):
+    def test_opencode_updates_existing_json_or_jsonc_and_uninstalls_all_active_files(self):
         for scope in ("project", "user"):
             with self.subTest(scope=scope):
                 default, skills = self.expected_paths("opencode", scope)
@@ -405,7 +417,7 @@ class SetupTests(unittest.TestCase):
                 args = ("--user",) if scope == "user" else ()
                 self.run_main("uninstall", "opencode", *args)
                 self.assertNotIn("qpanda3-runtime", json.loads(default.read_text(encoding="utf8"))["mcp"])
-                self.assertEqual(json_file.read_bytes(), before_json)
+                self.assertNotIn("qpanda3-runtime", kit.load_client_config(json_file)["mcp"])
                 self.assertFalse((skills / "qpanda3-programming").exists())
 
     def test_codewhale_preserves_constitution_and_compatible_mcpservers_format(self):
@@ -438,6 +450,366 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(updated["mcp"]["legacy"], data["mcpServers"]["legacy"])
         self.assertEqual(updated["mcp"]["other"], data["mcp"]["other"])
         self.assertEqual(updated["keep"], 42)
+
+    def test_toml_serialization_failure_preserves_bytes_and_skill(self):
+        self.prepare_literal("codex")
+        config, skills = self.expected_paths("codex", "project")
+        before = config.read_bytes()
+        marker = skills / "qpanda3-programming/local.txt"
+        marker.write_text("keep", encoding="utf8")
+        bad = self.project / "input.json"
+        entry = kit.generate_mcp_entry("fake", kit.DEFAULT_MCP_URL)
+        entry["qpanda3-runtime"]["unsupported_null"] = None
+        write_fixture(bad, {"mcp": entry})
+        with self.assertRaises(TypeError):
+            self.run_main("prepare", "codex", "-k", str(bad))
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(marker.read_text(encoding="utf8"), "keep")
+
+    def test_atomic_replace_failure_retains_original_file_and_removes_temporary(self):
+        path = self.project / "config.json"
+        path.write_bytes(b'{"original": true}\r\n')
+        before = path.read_bytes()
+        with patch.object(kit.os, "replace", side_effect=OSError("fixture replace failure")), self.assertRaises(OSError):
+            kit.write_client_config(path, {"new": True})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(self.project.iterdir()), [path])
+
+    def test_multi_file_write_failure_restores_previous_config(self):
+        paths = [self.project / "a.json", self.project / "b.json"]
+        for path in paths:
+            path.write_bytes(b'{"keep":true}\r\n')
+        replace = kit.os.replace
+        failed = False
+        def fail_second(source, destination):
+            nonlocal failed
+            if destination == paths[1] and not failed:
+                failed = True
+                raise OSError("fixture second-file failure")
+            return replace(source, destination)
+        with patch.object(kit.os, "replace", side_effect=fail_second), self.assertRaises(OSError):
+            kit.write_config_batch([(p, {"new": True}) for p in paths], self.project)
+        self.assertTrue(all(p.read_bytes() == b'{"keep":true}\r\n' for p in paths))
+
+    def test_jsonc_block_comments_and_comment_markers_inside_strings(self):
+        config = self.project / "opencode.jsonc"
+        config.write_text('/* setup */ {"url":"https://example.invalid/a/*b*/", "mcp":{}, /* block\ncomment */ "keep":42,}', encoding="utf8")
+        self.prepare_literal("opencode")
+        data = kit.load_client_config(config)
+        self.assertEqual(data["url"], "https://example.invalid/a/*b*/")
+        self.assertEqual(data["keep"], 42)
+
+    def test_same_name_controls_are_preserved_for_every_client(self):
+        controls = {
+            "opencode": {"enabled": False, "timeout": 9876},
+            "claude": {"customControl": "keep"},
+            "codex": {"enabled": False, "enabled_tools": ["device_list"], "startup_timeout_sec": 42},
+            "gemini": {"timeout": 9876, "includeTools": ["device_list"]},
+            "codebuddy": {"disabled": True, "timeout": 9876},
+            "cline": {"disabled": True, "autoApprove": ["device_list"], "timeout": 42},
+            "codewhale": {"disabled": True, "enabled": False, "required": False},
+            "zcode": {"enable": False, "timeout": 9876},
+        }
+        for tool, settings in controls.items():
+            scope = "project" if tool in PROJECT_LAYOUTS else "user"
+            with self.subTest(tool=tool):
+                config, _ = self.expected_paths(tool, scope)
+                data = config_fixture(tool)
+                servers_for(tool, data)["qpanda3-runtime"] = {"url": "https://old.invalid", **settings}
+                write_fixture(config, data)
+                self.prepare_literal(tool, scope)
+                actual = servers_for(tool, kit.load_client_config(config))["qpanda3-runtime"]
+                for key, value in settings.items():
+                    self.assertEqual(actual[key], value)
+
+    def test_codex_credential_mode_changes_remove_old_auth_but_retain_custom_header(self):
+        self.prepare_literal("codex")
+        config, _, data = self.config("codex")
+        data["mcp_servers"]["qpanda3-runtime"]["http_headers"]["X-Custom"] = "keep"
+        kit.write_client_config(config, data)
+        self.prepare("codex")
+        entry = self.config("codex")[2]["mcp_servers"]["qpanda3-runtime"]
+        self.assertEqual(entry["http_headers"], {"X-Custom": "keep"})
+        self.assertEqual(entry["env_http_headers"], {"X-Api-Key": "QPANDA3_TEST_KEY"})
+        self.prepare_literal("codex")
+        entry = self.config("codex")[2]["mcp_servers"]["qpanda3-runtime"]
+        self.assertNotIn("env_http_headers", entry)
+        self.assertEqual(entry["http_headers"]["X-Custom"], "keep")
+
+    def test_opencode_all_files_and_nested_containers_update_and_uninstall(self):
+        paths = [self.project / name for name in ("opencode.jsonc", "opencode.json", ".opencode/opencode.jsonc", ".opencode/opencode.json")]
+        for path in paths:
+            write_fixture(path, {"mcp": {"qpanda3-runtime": {"type": "remote", "url": "https://old.invalid", "enabled": False}, "servers": {"qpanda3-runtime": {"url": "https://old.invalid", "enabled": False}, "other": {"command": ["keep"]}}}, "keep": 42})
+        self.prepare_literal("opencode")
+        for path in paths:
+            data = kit.load_client_config(path)
+            self.assertEqual(data["mcp"]["qpanda3-runtime"]["url"], kit.DEFAULT_MCP_URL)
+            self.assertFalse(data["mcp"]["qpanda3-runtime"]["enabled"])
+            self.assertEqual(data["mcp"]["servers"]["qpanda3-runtime"]["url"], kit.DEFAULT_MCP_URL)
+        self.run_main("uninstall", "opencode")
+        for path in paths:
+            data = kit.load_client_config(path)
+            self.assertNotIn("qpanda3-runtime", data["mcp"])
+            self.assertNotIn("qpanda3-runtime", data["mcp"]["servers"])
+            self.assertEqual(data["mcp"]["servers"]["other"], {"command": ["keep"]})
+
+    def test_opencode_legacy_url_and_stdio_are_converted_and_unknown_entries_fail(self):
+        config = self.project / "opencode.json"
+        write_fixture(config, {"mcpServers": {"web": {"url": "https://example.invalid", "disabled": True}, "local": {"command": "node", "args": ["server.js"], "env": {"TEST": "fixture"}}}})
+        self.prepare_literal("opencode")
+        data = kit.load_client_config(config)["mcp"]
+        self.assertEqual(data["web"], {"type": "remote", "url": "https://example.invalid", "enabled": False})
+        self.assertEqual(data["local"], {"type": "local", "command": ["node", "server.js"], "environment": {"TEST": "fixture"}})
+        write_fixture(config, {"mcpServers": {"unknown": {"strange": True}}})
+        before = config.read_bytes()
+        with self.assertRaises(ValueError):
+            self.prepare_literal("opencode")
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_zcode_imports_effective_fallback_without_losing_controls(self):
+        fallback = self.project / ".agents/mcp.json"
+        write_fixture(fallback, {"mcpServers": {"other": {"command": "keep", "enable": False}, "qpanda3-runtime": {"url": "https://old.invalid", "enable": False}}})
+        before = fallback.read_bytes()
+        self.prepare_literal("zcode")
+        entry = self.config("zcode")[2]["mcp"]["servers"]
+        self.assertEqual(entry["other"], {"command": "keep", "enable": False})
+        self.assertFalse(entry["qpanda3-runtime"]["enable"])
+        self.assertEqual(fallback.read_bytes(), before)
+        self.run_main("uninstall", "zcode")
+        self.assertNotIn("qpanda3-runtime", kit.load_client_config(fallback)["mcpServers"])
+        self.assertIn("other", kit.load_client_config(fallback)["mcpServers"])
+
+    def test_claude_creation_preserves_codebuddy_effective_fallback(self):
+        fallback = self.project / "mcp.json"
+        write_fixture(fallback, {"mcpServers": {"other": {"command": "keep"}}})
+        before = fallback.read_bytes()
+        self.prepare_literal("claude")
+        self.assertEqual(self.config("claude")[2]["mcpServers"]["other"], {"command": "keep"})
+        self.assertEqual(fallback.read_bytes(), before)
+
+    def test_codewhale_uses_legacy_state_without_shadowing_it(self):
+        legacy = self.home / ".deepseek/mcp.json"
+        write_fixture(legacy, {"servers": {"other": {"command": "keep"}}})
+        self.prepare_literal("codewhale", "user")
+        self.assertFalse((self.home / ".codewhale/mcp.json").exists())
+        self.assertIn("other", kit.load_client_config(legacy)["servers"])
+        self.run_main("uninstall", "codewhale", "--user")
+        self.assertEqual(kit.load_client_config(legacy), {"servers": {"other": {"command": "keep"}}})
+
+    def test_skill_update_removes_obsolete_files(self):
+        self.prepare_literal("claude")
+        target = self.project / ".claude/skills/qpanda3-programming"
+        (target / "obsolete.txt").write_text("old", encoding="utf8")
+        self.prepare_literal("claude")
+        self.assertFalse((target / "obsolete.txt").exists())
+        self.assertTrue((target / "resources/example.txt").is_file())
+
+    def test_bad_new_skill_layout_does_not_use_old_skill_md_or_change_config(self):
+        self.prepare_literal("claude")
+        target = self.project / ".claude/skills/qpanda3-programming"
+        config = self.project / ".mcp.json"
+        before = config.read_bytes()
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr("outer/inner/SKILL.md", "wrong layout")
+        with patch.dict(FixtureHandler.extra_archives, {"/qpanda3-programming.zip": output.getvalue()}), self.assertRaises(ValueError):
+            self.prepare_literal("claude")
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual((target / "resources/example.txt").read_text(encoding="utf8"), "fixture reference")
+
+    def test_skill_copy_and_config_failures_restore_old_tree(self):
+        self.prepare_literal("claude")
+        target = self.project / ".claude/skills/qpanda3-programming"
+        config = self.project / ".mcp.json"
+        (target / "old.txt").write_text("keep", encoding="utf8")
+        before = config.read_bytes()
+        copytree = kit.shutil.copytree
+        failed = False
+        def fail_install(source, destination, *args, **kwargs):
+            nonlocal failed
+            if Path(destination) == target and not failed:
+                failed = True
+                target.mkdir(parents=True)
+                (target / "partial.txt").write_text("partial", encoding="utf8")
+                raise OSError("fixture copy failure")
+            return copytree(source, destination, *args, **kwargs)
+        with patch.object(kit.shutil, "copytree", side_effect=fail_install), self.assertRaises(OSError):
+            self.prepare_literal("claude")
+        self.assertEqual((target / "old.txt").read_text(encoding="utf8"), "keep")
+        self.assertFalse((target / "partial.txt").exists())
+        with patch.object(kit, "write_config_batch", side_effect=OSError("fixture config failure")), self.assertRaises(OSError):
+            self.prepare_literal("claude")
+        self.assertEqual((target / "old.txt").read_text(encoding="utf8"), "keep")
+        self.assertEqual(config.read_bytes(), before)
+
+    def make_directory_link(self, link, destination):
+        try:
+            link.symlink_to(destination, target_is_directory=True)
+        except OSError:
+            if os.name != "nt":
+                raise
+            result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(destination)], capture_output=True)
+            self.assertEqual(result.returncode, 0, "Cannot create junction fixture")
+
+    def test_linked_config_and_skill_parents_cannot_escape_scope(self):
+        for tool in ("codex", "gemini", "zcode"):
+            with self.subTest(tool=tool):
+                config, _ = self.expected_paths(tool, "project")
+                outside = self.base / (tool + "-outside")
+                outside.mkdir()
+                path = outside / config.name
+                write_fixture(path, config_fixture(tool))
+                before = path.read_bytes()
+                self.make_directory_link(config.parent, outside)
+                with self.assertRaises(ValueError):
+                    self.prepare_literal(tool)
+                with self.assertRaises(ValueError):
+                    self.run_main("uninstall", tool)
+                self.assertEqual(path.read_bytes(), before)
+                if config.parent.is_symlink():
+                    config.parent.unlink()
+                else:
+                    config.parent.rmdir()  # Remove the fixture junction itself only.
+        outside = self.base / "outside-skills"
+        outside.mkdir()
+        (self.project / ".claude").mkdir()
+        self.make_directory_link(self.project / ".claude/skills", outside)
+        with self.assertRaises(ValueError):
+            self.prepare_literal("claude")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_custom_root_overrides_fail_before_default_paths_are_written(self):
+        cases = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR", "gemini": "GEMINI_CLI_HOME", "opencode": "OPENCODE_CONFIG_DIR", "cline": "CLINE_MCP_SETTINGS_PATH", "codewhale": "CODEWHALE_HOME"}
+        for tool, name in cases.items():
+            scope = "project" if tool in PROJECT_LAYOUTS else "user"
+            with self.subTest(tool=tool), patch.dict(os.environ, {name: str(self.base / "custom")}):
+                with self.assertRaises(ValueError):
+                    self.prepare_literal(tool, scope)
+        self.assertEqual(list(self.project.iterdir()), [])
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_codebuddy_lowercase_environment_name_is_rejected(self):
+        with patch.dict(os.environ, {"review_lowercase": "fixture"}), self.assertRaises(SystemExit):
+            self.run_main("prepare", "codebuddy", "--api-key-env", "review_lowercase")
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_signed_skill_url_does_not_expose_query_fragment_or_userinfo(self):
+        logs = self.prepare_literal("claude", skill_url=self.url + "?token=fixture-signed-secret#private-fragment")
+        self.assertNotIn("fixture-signed-secret", logs)
+        self.assertNotIn("private-fragment", logs)
+        output = io.StringIO()
+        with patch.object(kit.urllib.request, "urlopen", side_effect=ValueError("bad url")), contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            kit.shared_download_zip("https://private-user:private-password@example.invalid/skill.zip?token=private-token")
+        self.assertNotIn("private-user", output.getvalue())
+        self.assertNotIn("private-password", output.getvalue())
+        self.assertNotIn("private-token", output.getvalue())
+
+    def test_shared_mcp_can_be_retained_with_skill_only_uninstall(self):
+        self.prepare_literal("claude")
+        self.prepare_literal("codebuddy")
+        config = self.project / ".mcp.json"
+        before = config.read_bytes()
+        self.run_main("uninstall", "claude", "--skill-only")
+        self.assertEqual(config.read_bytes(), before)
+        self.assertFalse((self.project / ".claude/skills/qpanda3-programming").exists())
+        self.assertTrue((self.project / ".codebuddy/skills/qpanda3-programming/SKILL.md").is_file())
+
+    def test_opencode_conflicting_container_controls_are_not_silently_chosen(self):
+        config = self.project / "opencode.jsonc"
+        write_fixture(config, {"mcp": {"qpanda3-runtime": {"url": "https://old.invalid", "enabled": False}, "servers": {"qpanda3-runtime": {"url": "https://old.invalid", "enabled": True}}}})
+        before = config.read_bytes()
+        with self.assertRaises(ValueError):
+            self.prepare_literal("opencode")
+        self.assertEqual(config.read_bytes(), before)
+        self.assertFalse((self.project / ".opencode/skills").exists())
+
+    def test_opencode_nested_mapping_may_contain_servers_named_type_and_enabled(self):
+        config = self.project / "opencode.jsonc"
+        other = {"type": {"type": "remote", "url": "https://example.invalid/type"}, "enabled": {"type": "local", "command": ["keep"]}}
+        write_fixture(config, {"mcp": {"servers": other}})
+        self.prepare_literal("opencode")
+        actual = kit.load_client_config(config)
+        self.assertIn("qpanda3-runtime", actual["mcp"]["servers"])
+        self.run_main("uninstall", "opencode")
+        self.assertEqual(kit.load_client_config(config), {"mcp": {"servers": other}})
+
+    def test_codebuddy_json_input_rejects_lowercase_header_variable(self):
+        config = self.project / "input.json"
+        write_fixture(config, {"mcp": kit.generate_mcp_entry("${review_lowercase}", kit.DEFAULT_MCP_URL)})
+        with self.assertRaises(ValueError):
+            self.run_main("prepare", "codebuddy", "-k", str(config))
+        self.assertFalse((self.project / ".mcp.json").exists())
+
+    def test_codewhale_custom_mcp_config_path_requires_manual_configuration(self):
+        config = self.home / ".codewhale/config.toml"
+        write_fixture(config, {"mcp_config_path": str(self.base / "custom-mcp.json")})
+        before = config.read_bytes()
+        with self.assertRaises(ValueError):
+            self.prepare_literal("codewhale", "user")
+        self.assertEqual(config.read_bytes(), before)
+        self.assertFalse(config.with_name("mcp.json").exists())
+
+    def test_uninstall_aborts_before_any_write_if_claude_approval_is_linked(self):
+        self.prepare_literal("claude")
+        config = self.project / ".mcp.json"
+        before = config.read_bytes()
+        outside = self.base / "outside-approvals"
+        outside.mkdir()
+        write_fixture(outside / "settings.local.json", {"enabledMcpjsonServers": ["qpanda3-runtime"]})
+        settings = self.project / ".claude/settings.local.json"
+        # Use a directory link since Windows can create junctions without symlink privileges.
+        other_claude = self.project / ".claude-original"
+        settings.parent.rename(other_claude)
+        self.make_directory_link(settings.parent, outside)
+        with self.assertRaises(ValueError):
+            self.run_main("uninstall", "claude")
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(kit.load_client_config(outside / "settings.local.json"), {"enabledMcpjsonServers": ["qpanda3-runtime"]})
+
+    def test_zip_paths_links_and_extraction_limits_are_rejected(self):
+        unsafe = ("../SKILL.md", "/SKILL.md", "C:/SKILL.md", "wrapper\\SKILL.md")
+        for index, name in enumerate(unsafe):
+            with self.subTest(path=name):
+                path = self.base / f"unsafe-{index}.zip"
+                with zipfile.ZipFile(path, "w") as archive:
+                    info = zipfile.ZipInfo("placeholder")
+                    # ZipInfo's constructor normalizes Windows separators;
+                    # assign the raw member name to model an externally built ZIP.
+                    info.filename = info.orig_filename = name
+                    archive.writestr(info, "fixture")
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                    kit.shared_validate_zip(path)
+        path = self.base / "linked.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            info = zipfile.ZipInfo("SKILL.md")
+            info.create_system = 3
+            info.external_attr = 0o120777 << 16
+            archive.writestr(info, "elsewhere")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            kit.shared_validate_zip(path)
+        path = self.base / "too-many.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("SKILL.md", "fixture")
+            for index in range(10000):
+                archive.writestr(f"files/{index}", "")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            kit.shared_validate_zip(path)
+
+    def test_config_edited_during_download_is_not_overwritten(self):
+        self.prepare_literal("claude")
+        config = self.project / ".mcp.json"
+        target = self.project / ".claude/skills/qpanda3-programming"
+        (target / "local.txt").write_text("keep", encoding="utf8")
+        download = kit.shared_download_zip
+        recent = {"mcpServers": {"new-personal-server": {"command": "keep"}}}
+        def edit_during_download(url):
+            name = download(url)
+            write_fixture(config, recent)
+            return name
+        with patch.object(kit, "shared_download_zip", side_effect=edit_during_download), self.assertRaises(ValueError):
+            self.prepare_literal("claude")
+        self.assertEqual(kit.load_client_config(config), recent)
+        self.assertEqual((target / "local.txt").read_text(encoding="utf8"), "keep")
 
 
 if __name__ == "__main__":
