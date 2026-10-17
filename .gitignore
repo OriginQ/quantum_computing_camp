@@ -1,2 +1,16 @@
 *.vs/*
 
+# Local environments, downloaded skills, credentials and verification artifacts
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+.tmp/
+.env
+.env.*
+.mcp.json
+mcp.json
+.codex/config.toml
+.claude/settings.local.json
+.claude/skills/qpanda3-programming/
+.agents/skills/qpanda3-programming/
+.codebuddy/skills/qpanda3-programming/
