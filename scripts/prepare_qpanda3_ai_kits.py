@@ -149,18 +149,23 @@ def wrap_mcp_entry(tool: str, entry: dict) -> dict:
             servers[name] = cfg
         return {"mcp_servers": servers}
     elif tool == "gemini":
-        return {"mcpServers": entry}
+        servers = {}
+        for name, cfg in entry.items():
+            cfg = dict(cfg)
+            cfg["httpUrl"] = cfg.pop("url")
+            for field in ("type", "transport"):
+                cfg.pop(field, None)
+            servers[name] = cfg
+        return {"mcpServers": servers}
     elif tool == "cline":
         servers = {}
         for name, cfg in entry.items():
             servers[name] = {
                 "disabled": False,
                 "autoApprove": [],
-                "transport": {
-                    "type": "streamableHttp",
-                    "url": cfg["url"],
-                    "headers": cfg.get("headers", {}),
-                },
+                "type": "streamableHttp",
+                "url": cfg["url"],
+                "headers": cfg.get("headers", {}),
             }
         return {"mcpServers": servers}
     elif tool == "codewhale":
@@ -169,17 +174,7 @@ def wrap_mcp_entry(tool: str, entry: dict) -> dict:
             servers[name] = {
                 "url": cfg["url"],
                 "headers": cfg.get("headers", {}),
-                "command": None,
-                "args": [],
-                "env": {},
-                "connect_timeout": None,
-                "execute_timeout": None,
-                "read_timeout": None,
-                "disabled": False,
                 "enabled": True,
-                "required": False,
-                "enabled_tools": [],
-                "disabled_tools": [],
             }
         return {"servers": servers}
     elif tool == "zcode":
@@ -219,17 +214,12 @@ TOOL_COMMANDS = {
 def check_tool_usable(tool: str, scope: str) -> bool:
     if tool == "cline" and scope == "project":
         log_error(
-            "Cline only supports user-level configuration. Use 'prepare cline -k KEY --user'."
+            "Cline CLI MCP uses user-level configuration. Use 'prepare cline -k KEY --user'."
         )
         return False
     if tool == "codewhale" and scope == "project":
         log_error(
-            "Codewhale only supports user-level configuration. Use 'prepare codewhale -k KEY --user'."
-        )
-        return False
-    if tool == "zcode" and scope == "project":
-        log_error(
-            "ZCode only supports user-level configuration. Use 'prepare zcode -k KEY --user'."
+            "Codewhale MCP uses user-level configuration. Use 'prepare codewhale -k KEY --user'."
         )
         return False
     if scope == "project":
@@ -294,6 +284,8 @@ def shared_download_zip(url):
         with urllib.request.urlopen(url, timeout=30) as response, open(TMP_ZIP, "wb") as output:
             shutil.copyfileobj(response, output)
     except Exception as e:
+        if isinstance(e, urllib.error.HTTPError):
+            e.close()
         log_error(f"Download failed ({type(e).__name__}); check skill_url and network")
         sys.exit(1)
     log_ok("Download complete")
@@ -422,361 +414,6 @@ def shared_test_connection(url, headers=None, skip_env_vars=False):
         log_error(f"Connection failed: {e.reason}")
 
 
-# ══════════════════════ Tool Modules ══════════════════════
-
-# ---------- OpenCode ----------
-
-
-def opencode_mcp_merge():
-    os.makedirs(OC_CONFIG_DIR, exist_ok=True)
-    if os.path.isfile(OC_CONFIG_FILE):
-        with open(OC_CONFIG_FILE, encoding="utf-8") as f:
-            ct = f.read()
-        try:
-            ex = commentjson.loads(ct) if ct.strip() else {}
-        except:
-            ex = stdjson.loads(ct) if ct.strip() else {}
-        nd = stdjson.loads(OC_NORMALIZED_JSON)
-        se = ex.get("mcp") or ex.get("mcpServers", {})
-        for n, e in nd["mcp"].items():
-            se[n] = e
-        ex["mcp"] = se
-        ex.pop("mcpServers", None)
-        merged = stdjson.dumps(ex, indent=2, ensure_ascii=False)
-    else:
-        merged = OC_NORMALIZED_JSON
-    with open(OC_CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(merged)
-        log_ok(f"Written: {OC_CONFIG_FILE}")
-
-
-def run_prepare_opencode(mcp_cfg: dict, skill_url: str, scope: str):
-    global \
-        OC_CONFIG_DIR, \
-        OC_CONFIG_FILE, \
-        OC_NORMALIZED_JSON, \
-        OC_SKILL_IG, \
-        OC_SKILL_IP, \
-        OC_SKILL_PR
-    log_info("Configuring OpenCode MCP")
-    if scope == "project":
-        OC_CONFIG_DIR = os.path.join(PROJECT_DIR, ".opencode")
-    else:
-        OC_CONFIG_DIR = os.path.expanduser("~/.config/opencode")
-    OC_CONFIG_FILE = os.path.join(OC_CONFIG_DIR, "opencode.jsonc")
-    OC_NORMALIZED_JSON = stdjson.dumps(
-        wrap_mcp_entry("opencode", mcp_cfg), indent=2, ensure_ascii=False
-    )
-    opencode_mcp_merge()
-
-    log_info("Installing QPanda3 Skill")
-    SKILL_NAME = shared_download_zip(skill_url)
-    if scope == "project":
-        target = os.path.join(PROJECT_DIR, ".opencode", "skills", SKILL_NAME)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        OC_SKILL_IG = False
-        OC_SKILL_IP = True
-        OC_SKILL_PR = PROJECT_DIR
-    else:
-        target = os.path.expanduser(f"~/.config/opencode/skills/{SKILL_NAME}")
-        OC_SKILL_IG = True
-        OC_SKILL_IP = False
-    shared_extract_and_install(SKILL_ZIP_PATH, target, f"{scope} {target}")
-
-    if globals().get("OC_SKILL_IG") or globals().get("OC_SKILL_IP"):
-        f = False
-        if OC_SKILL_IG and os.path.isfile(
-            os.path.expanduser(f"~/.config/opencode/skills/{SKILL_NAME}/SKILL.md")
-        ):
-            f = True
-        if OC_SKILL_IP and os.path.isfile(
-            os.path.join(OC_SKILL_PR, ".opencode", "skills", SKILL_NAME, "SKILL.md")
-        ):
-            f = True
-        if f:
-            log_ok(f"Skill {SKILL_NAME} installed!")
-            print("┌────────────────────────────────────────")
-            print(f"│  Skill: {SKILL_NAME}")
-            if OC_SKILL_IG:
-                print(
-                    f"│  global: {os.path.expanduser(f'~/.config/opencode/skills/{SKILL_NAME}/')}"
-                )
-            if OC_SKILL_IP:
-                print(
-                    f"│  project: {os.path.join(OC_SKILL_PR, '.opencode', 'skills', SKILL_NAME)}/"
-                )
-            print("│  Tip: restart OpenCode")
-            print("└────────────────────────────────────────")
-        else:
-            log_error("Verification failed")
-            sys.exit(1)
-
-
-# ---------- Gemini ----------
-
-
-def gemini_mcp_merge():
-    os.makedirs(GM_CONFIG_DIR, exist_ok=True)
-    if os.path.isfile(GM_CONFIG_FILE):
-        with open(GM_CONFIG_FILE, encoding="utf-8") as f:
-            ct = f.read()
-        ex = stdjson.loads(ct) if ct.strip() else {}
-        nd = stdjson.loads(GM_NORMALIZED_JSON)
-        if "mcpServers" not in ex:
-            ex["mcpServers"] = {}
-        for n, e in nd["mcpServers"].items():
-            ex["mcpServers"][n] = e
-        merged = stdjson.dumps(ex, indent=2, ensure_ascii=False)
-    else:
-        merged = GM_NORMALIZED_JSON
-    with open(GM_CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(merged)
-        log_ok(f"Written: {GM_CONFIG_FILE}")
-
-
-def run_prepare_gemini(mcp_cfg: dict, skill_url: str, scope: str):
-    global \
-        GM_CONFIG_DIR, \
-        GM_CONFIG_FILE, \
-        GM_NORMALIZED_JSON, \
-        GM_SKILL_IG, \
-        GM_SKILL_IP, \
-        GM_SKILL_PR
-    log_info("Configuring Gemini CLI MCP")
-    if scope == "project":
-        GM_CONFIG_DIR = os.path.join(PROJECT_DIR, ".gemini")
-    else:
-        GM_CONFIG_DIR = os.path.expanduser("~/.gemini")
-    GM_CONFIG_FILE = os.path.join(GM_CONFIG_DIR, "settings.json")
-    GM_NORMALIZED_JSON = stdjson.dumps(
-        wrap_mcp_entry("gemini", mcp_cfg), indent=2, ensure_ascii=False
-    )
-    gemini_mcp_merge()
-
-    log_info("Installing QPanda3 Skill")
-    SKILL_NAME = shared_download_zip(skill_url)
-    if scope == "project":
-        target = os.path.join(PROJECT_DIR, ".gemini", "skills", SKILL_NAME)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        GM_SKILL_IG = False
-        GM_SKILL_IP = True
-        GM_SKILL_PR = PROJECT_DIR
-    else:
-        target = os.path.expanduser(f"~/.gemini/skills/{SKILL_NAME}")
-        GM_SKILL_IG = True
-        GM_SKILL_IP = False
-    shared_extract_and_install(SKILL_ZIP_PATH, target, f"{scope} {target}")
-
-    f = False
-    if GM_SKILL_IG and os.path.isfile(
-        os.path.expanduser(f"~/.gemini/skills/{SKILL_NAME}/SKILL.md")
-    ):
-        f = True
-    if GM_SKILL_IP and os.path.isfile(
-        os.path.join(GM_SKILL_PR, ".gemini", "skills", SKILL_NAME, "SKILL.md")
-    ):
-        f = True
-    if f:
-        log_ok(f"Skill {SKILL_NAME} installed!")
-        print("┌────────────────────────────────────────")
-        print(f"│  Skill: {SKILL_NAME}")
-        if GM_SKILL_IG:
-            print(f"│  user: {os.path.expanduser(f'~/.gemini/skills/{SKILL_NAME}/')}")
-        if GM_SKILL_IP:
-            print(
-                f"│  project: {os.path.join(GM_SKILL_PR, '.gemini', 'skills', SKILL_NAME)}/"
-            )
-        print("│  Tip: restart Gemini CLI")
-        print("└────────────────────────────────────────")
-    else:
-        log_error("Verification failed")
-        sys.exit(1)
-
-
-# ---------- Cline ----------
-
-
-def cline_mcp_merge():
-    os.makedirs(CLN_CONFIG_DIR, exist_ok=True)
-    if os.path.isfile(CLN_CONFIG_FILE):
-        with open(CLN_CONFIG_FILE, encoding="utf-8") as f:
-            ct = f.read()
-        ex = stdjson.loads(ct) if ct.strip() else {}
-        nd = stdjson.loads(CLN_NORMALIZED_JSON)
-        if "mcpServers" not in ex:
-            ex["mcpServers"] = {}
-        for n, e in nd["mcpServers"].items():
-            ex["mcpServers"][n] = e
-        merged = stdjson.dumps(ex, indent=2, ensure_ascii=False)
-    else:
-        merged = CLN_NORMALIZED_JSON
-    with open(CLN_CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(merged)
-        log_ok(f"Written: {CLN_CONFIG_FILE}")
-
-
-def run_prepare_cline(mcp_cfg: dict, skill_url: str, scope: str):
-    global CLN_CONFIG_DIR, CLN_CONFIG_FILE, CLN_NORMALIZED_JSON
-    log_info("Configuring Cline MCP")
-    CLN_CONFIG_DIR = os.path.expanduser("~/.cline/data/settings")
-    CLN_CONFIG_FILE = os.path.join(CLN_CONFIG_DIR, "cline_mcp_settings.json")
-    CLN_NORMALIZED_JSON = stdjson.dumps(
-        wrap_mcp_entry("cline", mcp_cfg), indent=2, ensure_ascii=False
-    )
-    cline_mcp_merge()
-
-    log_info("Installing QPanda3 Skill")
-    SKILL_NAME = shared_download_zip(skill_url)
-    target = os.path.expanduser(f"~/.cline/skills/{SKILL_NAME}")
-    shared_extract_and_install(SKILL_ZIP_PATH, target, f"user {target}")
-
-    t = os.path.expanduser(f"~/.cline/skills/{SKILL_NAME}/SKILL.md")
-    if os.path.isfile(t):
-        log_ok(f"Skill {SKILL_NAME} installed!")
-        print("┌────────────────────────────────────────")
-        print(f"│  Skill: {SKILL_NAME}")
-        print(f"│  user: {os.path.expanduser(f'~/.cline/skills/{SKILL_NAME}/')}")
-        print("│  Tip: restart Cline")
-        print("└────────────────────────────────────────")
-    else:
-        log_error("Verification failed")
-        sys.exit(1)
-
-
-# ---------- Codewhale ----------
-
-
-def codewhale_mcp_merge():
-    os.makedirs(CW_CONFIG_DIR, exist_ok=True)
-    nd = stdjson.loads(CW_NORMALIZED_JSON)
-    servers = nd.get("servers", {})
-    existing = {}
-    if os.path.isfile(CW_CONFIG_FILE):
-        with open(CW_CONFIG_FILE, encoding="utf-8") as f:
-            ct = f.read()
-        if ct.strip():
-            existing = stdjson.loads(ct)
-    ms = existing.get("servers", {})
-    for n, e in servers.items():
-        ms[n] = e
-    existing["servers"] = ms
-    with open(CW_CONFIG_FILE, "w", encoding="utf-8") as f:
-        stdjson.dump(existing, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        log_ok(f"Written: {CW_CONFIG_FILE}")
-
-
-def codewhale_ensure_priority():
-    """Ensure '预加载技能库和mcp工具列表' exists in constitution.json priorities."""
-    cw_dir = os.path.expanduser("~/.codewhale")
-    constitution_file = os.path.join(cw_dir, "constitution.json")
-    if not os.path.isfile(constitution_file):
-        log_error(
-            f"constitution.json not found at {constitution_file}, "
-            "required for Codewhale configuration"
-        )
-        sys.exit(1)
-    try:
-        with open(constitution_file, encoding="utf-8") as f:
-            data = stdjson.load(f)
-        priorities = data.get("priorities", [])
-        target = "预加载技能库和mcp工具列表"
-        if target in priorities:
-            log_ok("Priority '预加载技能库和mcp工具列表' already exists")
-            return
-        priorities.append(target)
-        data["priorities"] = priorities
-        with open(constitution_file, "w", encoding="utf-8") as f:
-            stdjson.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        log_ok("Added priority '预加载技能库和mcp工具列表' to constitution.json")
-    except Exception as e:
-        log_error(f"Failed to update constitution.json: {e}")
-        sys.exit(1)
-
-
-def run_prepare_codewhale(mcp_cfg: dict, skill_url: str, scope: str):
-    global CW_CONFIG_DIR, CW_CONFIG_FILE, CW_NORMALIZED_JSON
-    log_info("Configuring Codewhale MCP")
-    CW_CONFIG_DIR = os.path.expanduser("~/.codewhale")
-    CW_CONFIG_FILE = os.path.join(CW_CONFIG_DIR, "mcp.json")
-    CW_NORMALIZED_JSON = stdjson.dumps(
-        wrap_mcp_entry("codewhale", mcp_cfg), indent=2, ensure_ascii=False
-    )
-    codewhale_mcp_merge()
-    codewhale_ensure_priority()
-
-    log_info("Installing QPanda3 Skill")
-    SKILL_NAME = shared_download_zip(skill_url)
-    target = os.path.expanduser(f"~/.codewhale/skills/{SKILL_NAME}")
-    shared_extract_and_install(SKILL_ZIP_PATH, target, f"user {target}")
-
-    t = os.path.expanduser(f"~/.codewhale/skills/{SKILL_NAME}/SKILL.md")
-    if os.path.isfile(t):
-        log_ok(f"Skill {SKILL_NAME} installed!")
-        print("┌────────────────────────────────────────")
-        print(f"│  Skill: {SKILL_NAME}")
-        print(f"│  user: {os.path.expanduser(f'~/.codewhale/skills/{SKILL_NAME}/')}")
-        print("│  Tip: restart Codewhale")
-        print("└────────────────────────────────────────")
-    else:
-        log_error("Verification failed")
-        sys.exit(1)
-
-
-# ---------- ZCode Agent ----------
-
-
-def zcode_mcp_merge():
-    os.makedirs(ZC_CONFIG_DIR, exist_ok=True)
-    existing = {}
-    if os.path.isfile(ZC_CONFIG_FILE):
-        with open(ZC_CONFIG_FILE, encoding="utf-8") as f:
-            ct = f.read()
-        if ct.strip():
-            existing = stdjson.loads(ct)
-    nd = stdjson.loads(ZC_NORMALIZED_JSON)
-    mcp_cfg = nd.get("mcp", {})
-    mcp = existing.get("mcp", {})
-    servers = mcp.get("servers", {})
-    for n, e in mcp_cfg.get("servers", {}).items():
-        servers[n] = e
-    mcp["servers"] = servers
-    existing["mcp"] = mcp
-    with open(ZC_CONFIG_FILE, "w", encoding="utf-8") as f:
-        stdjson.dump(existing, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        log_ok(f"Written: {ZC_CONFIG_FILE}")
-
-
-def run_prepare_zcode(mcp_cfg: dict, skill_url: str, scope: str):
-    global ZC_CONFIG_DIR, ZC_CONFIG_FILE, ZC_NORMALIZED_JSON
-    log_info("Configuring ZCode Agent MCP")
-    ZC_CONFIG_DIR = os.path.expanduser("~/.zcode/cli")
-    ZC_CONFIG_FILE = os.path.join(ZC_CONFIG_DIR, "config.json")
-    ZC_NORMALIZED_JSON = stdjson.dumps(
-        wrap_mcp_entry("zcode", mcp_cfg), indent=2, ensure_ascii=False
-    )
-    zcode_mcp_merge()
-
-    log_info("Installing QPanda3 Skill")
-    SKILL_NAME = shared_download_zip(skill_url)
-    target = os.path.expanduser(f"~/.zcode/skills/{SKILL_NAME}")
-    shared_extract_and_install(SKILL_ZIP_PATH, target, f"user {target}")
-
-    t = os.path.expanduser(f"~/.zcode/skills/{SKILL_NAME}/SKILL.md")
-    if os.path.isfile(t):
-        log_ok(f"Skill {SKILL_NAME} installed!")
-        print("┌────────────────────────────────────────")
-        print(f"│  Skill: {SKILL_NAME}")
-        print(f"│  user: {os.path.expanduser(f'~/.zcode/skills/{SKILL_NAME}/')}")
-        print("│  Tip: restart ZCode Agent")
-        print("└────────────────────────────────────────")
-    else:
-        log_error("Verification failed")
-        sys.exit(1)
-
-
 # ══════════════════════ Main Entry ══════════════════════
 
 
@@ -811,16 +448,21 @@ def client_paths(tool, scope):
     if tool == "codex":
         return root / ".codex/config.toml", root / ".agents/skills"
     if tool == "opencode":
-        base = root / (".opencode" if scope == "project" else ".config/opencode")
-        return base / "opencode.jsonc", base / "skills"
+        base = root if scope == "project" else root / ".config/opencode"
+        candidates = [base / "opencode.jsonc", base / "opencode.json"]
+        config = next((p for p in candidates if p.is_file()), candidates[0])
+        skills = root / ".opencode/skills" if scope == "project" else base / "skills"
+        return config, skills
     if tool == "gemini":
         return root / ".gemini/settings.json", root / ".gemini/skills"
+    if tool == "zcode":
+        config = ".zcode/config.json" if scope == "project" else ".zcode/cli/config.json"
+        return root / config, root / ".zcode/skills"
     if scope != "user":
         raise ValueError(f"{tool} project scope is not supported; specify --user")
     paths = {
         "cline": (".cline/data/settings/cline_mcp_settings.json", ".cline/skills"),
         "codewhale": (".codewhale/mcp.json", ".codewhale/skills"),
-        "zcode": (".zcode/cli/config.json", ".zcode/skills"),
     }
     config, skills = paths[tool]
     return root / config, root / skills
@@ -854,14 +496,35 @@ def write_client_config(path, data):
     log_ok(f"Written: {path}")
 
 
+def client_servers(tool, data, create=False):
+    """Locate a client's server mapping, including ZCode's nested container."""
+    keys = {
+        "codex": ("mcp_servers",),
+        "opencode": ("mcp",),
+        "codewhale": ("servers",),
+        "zcode": ("mcp", "servers"),
+    }.get(tool, ("mcpServers",))
+    if tool == "codewhale" and "servers" not in data and "mcpServers" in data:
+        keys = ("mcpServers",)
+    current = data
+    for key in keys:
+        current = current.setdefault(key, {}) if create else current.get(key, {})
+        if not isinstance(current, dict):
+            raise ValueError(f"{key} must be an object")
+    return current
+
+
 def prepare_client(tool, mcp_cfg, skill_url, scope):
     config, skills = client_paths(tool, scope)
     data = load_client_config(config)
-    key = "mcp_servers" if tool == "codex" else "mcpServers"
-    servers = data.setdefault(key, {})
-    if not isinstance(servers, dict):
-        raise ValueError(f"{key} must be an object")
-    servers.update(wrap_mcp_entry(tool, mcp_cfg)[key])
+    servers = client_servers(tool, data, create=True)
+    if tool == "opencode" and "mcpServers" in data:
+        legacy = data.pop("mcpServers")
+        if not isinstance(legacy, dict):
+            raise ValueError("mcpServers must be an object")
+        for name, entry in legacy.items():
+            servers.setdefault(name, entry)
+    servers.update(client_servers(tool, wrap_mcp_entry(tool, mcp_cfg)))
     # Download and validate before changing client configuration.
     name = shared_download_zip(skill_url)
     target = skills / name
@@ -884,14 +547,7 @@ def uninstall_tool(tool, scope):
         if target.is_symlink():
             raise ValueError("Refusing to recursively uninstall a linked Skill")
     data = load_client_config(config)
-    key = {"codex": "mcp_servers", "opencode": "mcp", "codewhale": "servers"}.get(tool, "mcpServers")
-    parent = data
-    if tool == "zcode":
-        parent = data.get("mcp", {})
-        key = "servers"
-    servers = parent.get(key, {})
-    if not isinstance(servers, dict):
-        raise ValueError(f"{key} must be an object")
+    servers = client_servers(tool, data)
     if "qpanda3-runtime" in servers:
         del servers["qpanda3-runtime"]
         write_client_config(config, data)
@@ -918,7 +574,8 @@ def uninstall_tool(tool, scope):
 def cmd_list():
     print("Supported AI coding tools:")
     for key, info in SUPPORTED_TOOLS.items():
-        print(f"  {key:12s} {info['name']}")
+        scope = "user only (--user)" if key in ("cline", "codewhale") else "project (default), user (--user)"
+        print(f"  {key:12s} {info['name']:12s} {scope}")
 
 
 def build_parser():
@@ -926,7 +583,7 @@ def build_parser():
 
     parser = argparse.ArgumentParser(
         description="Configure QPanda3 MCP + programming Skill (project scope by default).",
-        epilog="Example: uv run python scripts/prepare_qpanda3_ai_kits.py prepare codex --api-key-env QPANDA3_API_KEY",
+        epilog='Example: uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare codex -k "QPANDA3_API_KEY"; cline and codewhale require --user.',
     )
     parser.add_argument("command", nargs="?", default="help", choices=("list", "prepare", "uninstall", "help"))
     parser.add_argument("tool", nargs="?", choices=tuple(SUPPORTED_TOOLS))
@@ -960,7 +617,7 @@ def main():
     if not tools:
         parser.error("No tools detected; specify the tool explicitly")
     for tool in tools:
-        if args.scope == "project" and tool in ("cline", "codewhale", "zcode"):
+        if args.scope == "project" and tool in ("cline", "codewhale"):
             parser.error(f"{tool} requires --user")
     log_info(f"Scope: {args.scope}; project directory: {PROJECT_DIR}")
     if args.command == "uninstall":
@@ -982,17 +639,9 @@ def main():
     else:
         parser.error("prepare requires -k/--apikey or --api-key-env")
     validate_mcp_entries(mcp_cfg)
-    other_installers = {
-        "opencode": run_prepare_opencode, "gemini": run_prepare_gemini,
-        "cline": run_prepare_cline, "codewhale": run_prepare_codewhale,
-        "zcode": run_prepare_zcode,
-    }
     for tool in tools:
         log_info(f"Preparing {SUPPORTED_TOOLS[tool]['name']}")
-        if tool in ("claude", "codex", "codebuddy"):
-            prepare_client(tool, mcp_cfg, skill_url, args.scope)
-        else:
-            other_installers[tool](mcp_cfg, skill_url, args.scope)
+        prepare_client(tool, mcp_cfg, skill_url, args.scope)
 
 
 if __name__ == "__main__":

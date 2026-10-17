@@ -12,8 +12,8 @@
 - [3. 配置 AI 编程助手](#3-配置-ai-编程助手)
   - [3.1 准备 MCP 密钥](#31-准备-mcp-密钥)
   - [3.2 选择 Skill](#32-选择-skill)
-  - [3.3 配置 Claude Code](#33-配置-claude-code)
-  - [3.4 配置 Codex](#34-配置-codex)
+  - [3.3 支持的客户端与配置位置](#33-支持的客户端与配置位置)
+  - [3.4 配置命令与检查](#34-配置命令与检查)
 - [4. 按需查阅](#4-按需查阅)
 
 ## 1. 配置 Python 环境
@@ -114,17 +114,20 @@ quantum_computing_camp/
 ├── .tmp/                             # 生成：本地运行时、缓存和中间文件
 │   ├── uv-cache/                     # uv 包缓存
 │   └── uv-python/                    # .venv 依赖的 Python 运行时
-├── .mcp.json                         # 生成：Claude Code 项目 MCP 配置
-├── .claude/skills/qpanda3-programming/ # 生成：Claude Code Skill
-├── .codex/config.toml                # 生成：Codex 项目 MCP 配置
-└── .agents/skills/qpanda3-programming/ # 生成：Codex Skill
+├── .agents/                          # 生成：Codex Skill
+├── .claude/                          # 生成：Claude Code Skill
+├── .codex/                           # 生成：Codex 配置
+├── .codebuddy/                       # 生成：CodeBuddy Skill
+├── .gemini/                          # 生成：Gemini CLI 配置与 Skill
+├── .opencode/                        # 生成：OpenCode Skill
+└── .zcode/                           # 生成：ZCode 配置与 Skill
 ```
 
-本地环境和上述 Agent 生成配置均已加入 `.gitignore`。`.tmp/uv-python/` 仍被 `.venv` 使用，环境使用期间请勿删除；脚本下载的 ZIP 和解压中间文件也放在 `.tmp/`，正常退出时清理。
+客户端目录按需生成，MCP 文件和 Skill 的具体位置统一见 3.3；脚本生成的项目配置和 Skill 已加入 `.gitignore`。`.tmp/uv-python/` 仍被 `.venv` 使用，环境使用期间请勿删除；脚本下载的 ZIP 和解压中间文件也放在 `.tmp/`，正常退出时清理。
 
 ## 3. 配置 AI 编程助手
 
-脚本默认写入当前项目，配置文件位置见上面的目录树。选择自己使用的 Agent 执行对应命令即可。
+脚本保留原版 8 个客户端入口：OpenCode、Claude Code、Codex、Gemini CLI、CodeBuddy Code、Cline CLI、Codewhale、ZCode Agent。支持项目级的默认写入当前仓库；Cline CLI、Codewhale 的 MCP 使用用户级配置，需显式加 `--user`。
 
 ### 3.1 准备 MCP 密钥
 
@@ -141,25 +144,54 @@ quantum_computing_camp/
 
 脚本默认安装 QPanda3 通用开发 Skill，实际安装名为 `qpanda3-programming`。`pyvqnet-skills` 及其 Python 依赖需按上游说明另行安装。
 
-### 3.3 配置 Claude Code
+### 3.3 支持的客户端与配置位置
+
+以下路径相对仓库根目录，`~` 表示当前用户主目录。Skill 目录内均有 `SKILL.md`。
+
+| 客户端／脚本参数 | MCP 配置位置 | Skill 位置 | 备注 |
+|---|---|---|---|
+| [OpenCode](https://opencode.ai/docs/config/)／`opencode` | `opencode.jsonc`，兼容已有 `opencode.json` | `.opencode/skills/qpanda3-programming/` | 项目级；优先使用已有 JSONC，其次 JSON |
+| [Claude Code](https://code.claude.com/docs/en/mcp)／`claude` | `.mcp.json` | `.claude/skills/qpanda3-programming/` | 项目级；首次确认项目 MCP |
+| [Codex](https://developers.openai.com/codex/mcp/)／`codex` | `.codex/config.toml` | `.agents/skills/qpanda3-programming/` | 项目级；需信任项目 |
+| [Gemini CLI](https://geminicli.com/docs/tools/mcp-server/)／`gemini` | `.gemini/settings.json` | `.gemini/skills/qpanda3-programming/` | 项目级；使用 Streamable HTTP 的 `httpUrl` |
+| [CodeBuddy Code](https://www.codebuddy.ai/docs/cli/codebuddy-dir)／`codebuddy` | `.mcp.json`，兼容已有 `mcp.json` | `.codebuddy/skills/qpanda3-programming/` | 项目级；与 Claude 可能共用 MCP 文件 |
+| [Cline CLI](https://docs.cline.bot/mcp/mcp-overview)／`cline` | `~/.cline/data/settings/cline_mcp_settings.json` | `~/.cline/skills/qpanda3-programming/` | 使用 `--user`；IDE 扩展通过其 MCP 设置面板导入 |
+| [Codewhale](https://codewhale.net/en/docs/mcp)／`codewhale` | `~/.codewhale/mcp.json` | `~/.codewhale/skills/qpanda3-programming/` | 终端 AI 编程客户端；使用 `--user` |
+| [ZCode Agent](https://zcode.z.ai/cn/docs/mcp-services)／`zcode` | `.zcode/config.json` | `.zcode/skills/qpanda3-programming/` | 项目级；用户级可显式使用 `--user` |
+
+### 3.4 配置命令与检查
+
+替换密钥后，**只执行自己所用客户端的命令**；每条均配置 MCP 并安装 Skill，不会安装客户端本身。
 
 ```powershell
+# OpenCode：项目级
+uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare opencode -k "QPANDA3_API_KEY"
+
+# Claude Code：项目级
 uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare claude -k "QPANDA3_API_KEY"
-claude
-```
 
-信任项目并确认使用项目 MCP，在交互会话输入 `/mcp`，检查 `qpanda3-runtime` 是否连接。项目 MCP 说明见[官方文档](https://code.claude.com/docs/en/mcp)。
-
-### 3.4 配置 Codex
-
-```powershell
+# Codex：项目级
 uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare codex -k "QPANDA3_API_KEY"
-codex
+
+# Gemini CLI：项目级
+uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare gemini -k "QPANDA3_API_KEY"
+
+# CodeBuddy Code：项目级
+uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare codebuddy -k "QPANDA3_API_KEY"
+
+# Cline CLI：用户级，影响该用户的所有项目
+uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare cline -k "QPANDA3_API_KEY" --user
+
+# Codewhale：用户级，影响该用户的所有项目
+uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare codewhale -k "QPANDA3_API_KEY" --user
+
+# ZCode Agent：项目级
+uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare zcode -k "QPANDA3_API_KEY"
 ```
 
-将项目设为受信任，Codex 才会加载项目配置；桌面端打开本仓库后新建会话。CLI 可用 `codex mcp list` 查看条目，并在交互会话输入 `/mcp` 检查连接。依据：[项目配置](https://developers.openai.com/codex/config-basic/)、[MCP](https://developers.openai.com/codex/mcp/)、[Skill 路径](https://developers.openai.com/codex/skills/)。
+配置后从仓库根目录启动客户端，或在桌面端打开本仓库并新建会话。按提示信任项目，在客户端的 MCP／Skill 面板确认 `qpanda3-runtime` 已连接、`qpanda3-programming` 可发现，再实际调用一次设备列表工具检查返回结果。
 
-两种客户端配置完成后，都应确认 `qpanda3-programming` Skill 可发现，并实际调用一次 MCP 工具检查返回结果；配置文件生成成功不代表服务已连接。
+Claude Code、Codex、Gemini CLI 可在交互会话用 `/mcp` 查看连接；Codex 也可运行 `codex mcp list`，Cline CLI 可运行 `cline config mcp`，Codewhale 可运行 `codewhale mcp list`。**写入配置成功不代表客户端已连接**，完整连接需在自己使用的客户端中检查。
 
 ## 4. 按需查阅
 
@@ -187,7 +219,7 @@ uv sync --upgrade-package pyqpanda3
 uv run --locked python scripts/prepare_qpanda3_ai_kits.py --help
 ```
 
-默认项目级配置；其他目录可加 `--project-dir '实际路径'`，用户级配置需显式加 `--user`。脚本保留上游的 `codebuddy` 等入口，完整工具列表用 `list` 查看。重新配置保留其他服务的设置值，原有注释和排版不保留。
+默认项目级配置；其他目录可加 `--project-dir '实际路径'`，用户级配置需显式加 `--user`。`list` 可查看全部入口及作用域。重新配置保留其他服务的设置值，原有注释和排版不保留；旧路径的历史配置不自动删除。
 
 脚本基于本源量子的[原始脚本](https://show.originqc.com.cn/prod/qcloudai/qpanda3-skill_MCP/prepare_qpanda3_ai_kits.py)改进。默认下载的 `qpanda3-programming` 分发包与 GitHub 仓库 `pyqpanda3-skill` 名称不同，内容不一定与 GitHub 当前版本完全一致。
 
