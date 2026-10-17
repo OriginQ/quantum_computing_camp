@@ -14,7 +14,8 @@
   - [3.2 选择 Skill](#32-选择-skill)
   - [3.3 支持的客户端与配置位置](#33-支持的客户端与配置位置)
   - [3.4 配置命令与检查](#34-配置命令与检查)
-- [4. 按需查阅](#4-按需查阅)
+- [4. 按主题学习 Notebook](#4-按主题学习-notebook)
+- [5. 按需查阅](#5-按需查阅)
 
 ## 1. 配置 Python 环境
 
@@ -89,7 +90,7 @@ assert sum(counts.values()) == 1000 and set(counts) <= {'00', '11'}
 uv run --locked jupyter lab
 ```
 
-在浏览器中选择 `training_day1.ipynb` 或 `training_day2.ipynb`。若不确定内核，在单元格运行 `import sys; print(sys.executable)`，确认指向项目 `.venv`。云任务单元格另需本源量子云凭据，首次验证先运行本地模拟部分。
+在浏览器中打开 `notebooks/day1/` 或 `notebooks/day2/`，按文件名前的编号学习，具体主题见[第 4 节](#4-按主题学习-notebook)。每份可独立从上到下运行；若不确定内核，在单元格运行 `import sys; print(sys.executable)`，确认指向项目 `.venv`。
 
 ## 2. 仓库结构
 
@@ -98,8 +99,9 @@ uv run --locked jupyter lab
 ```text
 quantum_computing_camp/
 ├── README.md                         # 环境部署入口
-├── training_day1.ipynb                # 第一天学习示例
-├── training_day2.ipynb                # 第二天学习示例
+├── notebooks/                        # 按主题拆分、保存运行输出的课程 Notebook
+│   ├── day1/                         # 01–06：基础线路、模拟、云、传态、编码、QFT
+│   └── day2/                         # 01–05：哈密顿量、变分、噪声、加法、Grover
 ├── pyproject.toml                    # Python 依赖与 uv 镜像配置
 ├── uv.lock                           # 本次同步的依赖版本
 ├── .python-version                   # 默认 Python 3.14
@@ -107,8 +109,9 @@ quantum_computing_camp/
 ├── LICENSE                           # 仓库许可证
 ├── scripts/                          # MCP 与 Skill 配置脚本
 │   └── prepare_qpanda3_ai_kits.py
-├── tests/                            # 配置脚本的自动化测试
-│   └── test_prepare_qpanda3_ai_kits.py
+├── tests/                            # 配置脚本与课程 Notebook 的回归测试
+│   ├── test_prepare_qpanda3_ai_kits.py
+│   └── test_training_notebooks.py     # Notebook 独立运行、输出与教学结果检查
 ├── docs/pdf/                         # 本地课程参考资料（可选）
 ├── .venv/                            # 生成：项目 Python 虚拟环境
 ├── .tmp/                             # 生成：本地运行时、缓存和中间文件
@@ -193,7 +196,34 @@ uv run --locked python scripts/prepare_qpanda3_ai_kits.py prepare zcode -k "QPAN
 
 Claude Code、Codex、Gemini CLI 可在交互会话用 `/mcp` 查看连接；Codex 也可运行 `codex mcp list`，Cline CLI 可运行 `cline config mcp`，Codewhale 可运行 `codewhale mcp list`。**写入配置成功不代表客户端已连接**，完整连接需在自己使用的客户端中检查。
 
-## 4. 按需查阅
+## 4. 按主题学习 Notebook
+
+每份 Notebook 已保存一次独立内核执行的文本与图像输出，重新运行时抽样结果可能略有不同。原有文字、字符线路图和课程插图保留，并增加图像线路图或结果图。图像输出已嵌入 Notebook；绘图中间文件存于 `.tmp/`。
+
+### 第一天：量子线路与基础算法
+
+| 顺序 | Notebook | 内容 |
+|---|---|---|
+| 01 | [构建量子线路](notebooks/day1/01_circuit_construction.ipynb) | 用 OriginIR、OpenQASM、QProg 三种方式构建 Bell 线路 |
+| 02 | [CPUQVM 本地模拟](notebooks/day1/02_local_simulation.ipynb) | 运行两比特线路，读取测量概率 |
+| 03 | [量子云运行](notebooks/day1/03_quantum_cloud.ipynb) | 选择后端、提交线路和查询结果的可选云端流程 |
+| 04 | [隐形传态与动态线路](notebooks/day1/04_teleportation.ipynb) | 条件校正、Bob 测量概率及经典位序说明 |
+| 05 | [量子态制备与编码](notebooks/day1/05_state_encoding.ipynb) | 基础、角度、振幅、稀疏编码与态矢量 |
+| 06 | [量子傅里叶变换](notebooks/day1/06_quantum_fourier_transform.ipynb) | 用 H、受控旋转和 SWAP 构建三比特 QFT |
+
+### 第二天：期望值与进阶算法
+
+| 顺序 | Notebook | 内容 |
+|---|---|---|
+| 01 | [哈密顿量与期望值](notebooks/day2/01_hamiltonian.ipynb) | Pauli 算符、理想与含噪声期望值及可选云端计算 |
+| 02 | [变分量子线路](notebooks/day2/02_variational_circuits.ipynb) | 参数化 ansatz、经典优化与能量曲线 |
+| 03 | [含噪声模拟](notebooks/day2/03_noise_simulation.ipynb) | 门噪声、读出噪声和 Bell 偶校验概率 |
+| 04 | [量子加法器](notebooks/day2/04_quantum_adder.ipynb) | 半加器、全加器及默认 12 比特的 3 + 5 示例 |
+| 05 | [Grover 搜索](notebooks/day2/05_grover_search.ipynb) | oracle、扩散算子、本地搜索分布及可选云端运行 |
+
+量子云相关 Notebook 默认 `RUN_ON_QCLOUD = False`，对应单元格保存的是明确的跳过提示，**不代表云端任务已执行**。需要真机任务时，在启动 Jupyter 前准备 `APIKEY` 环境变量，再手动开启；后端可用性和任务结果以实际返回为准。原第二天末尾空白的“AI工具”主题统一见[第 3 节](#3-配置-ai-编程助手)。
+
+## 5. 按需查阅
 
 <details>
 <summary>平台支持与 macOS / Linux 安装环境</summary>
