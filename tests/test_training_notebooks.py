@@ -113,6 +113,84 @@ class LocalLessonTests(unittest.TestCase):
                     elif topic == "05_grover_search":
                         self.assertGreater(namespace["local_counts"].get(namespace["dst"], 0), 800)
 
+    def test_qft_appendix_matches_positive_fourier_transform_and_inverse(self):
+        from pyqpanda3.quantum_info import StateVector
+
+        namespace = execute(notebook(1, "06_quantum_fourier_transform"))
+        rng = np.random.default_rng(20261018)
+        for n in range(1, 5):
+            with self.subTest(n=n):
+                size = 2**n
+                indices = np.arange(size)
+                expected = np.exp(2j * np.pi * np.outer(indices, indices) / size) / np.sqrt(size)
+                circuit = namespace["qft_circuit"](n)
+                actual = namespace["circuit_matrix"](circuit, n)
+                np.testing.assert_allclose(actual, expected, atol=1e-12)
+                reversed_indices = [int(format(k, f"0{n}b")[::-1], 2) for k in indices]
+                without_swaps = namespace["circuit_matrix"](namespace["qft_circuit"](n, swaps=False), n)
+                np.testing.assert_allclose(without_swaps, expected[reversed_indices], atol=1e-12)
+                vector = rng.normal(size=size) + 1j * rng.normal(size=size)
+                vector /= np.linalg.norm(vector)
+                output = StateVector(vector.tolist()).evolve(circuit)
+                np.testing.assert_allclose(output.ndarray(), np.fft.ifft(vector) * np.sqrt(size), atol=1e-12)
+                np.testing.assert_allclose(output.evolve(circuit.dagger()).ndarray(), vector, atol=1e-12)
+        np.testing.assert_allclose(namespace["periodic_probabilities"],
+                                   [0.25, 0, 0.25, 0, 0.25, 0, 0.25, 0], atol=1e-12)
+
+    def test_grover_appendix_sign_target_order_and_multiple_solutions(self):
+        from pyqpanda3.core import QProg
+        from pyqpanda3.quantum_info import StateVector
+
+        namespace = execute(notebook(2, "05_grover_search"))
+        matrix = namespace["grover_program_matrix"]
+        oracle = namespace["build_oracle"]
+        diffusion = namespace["build_diffusion"]
+        first_peak = namespace["grover_first_peak"]
+        for n in (2, 3):
+            size = 2**n
+            qubits = list(range(n))
+            initial = np.ones(size, dtype=complex) / np.sqrt(size)
+            expected_diffusion = np.eye(size) - 2 * np.outer(initial, initial.conj())
+            np.testing.assert_allclose(matrix(diffusion(qubits), n), expected_diffusion, atol=1e-12)
+            for target in range(size):
+                with self.subTest(n=n, target=target):
+                    expected = np.eye(size, dtype=complex)
+                    expected[target, target] = -1
+                    np.testing.assert_allclose(matrix(oracle(qubits, format(target, f"0{n}b")), n), expected, atol=1e-12)
+        qubits = [0, 1, 2]
+        for targets in ([1], [1, 6], [0, 2, 5], [0, 1, 2, 3]):
+            with self.subTest(targets=targets):
+                program = QProg()
+                for target in targets:
+                    program << oracle(qubits, format(target, "03b"))
+                program << diffusion(qubits)
+                state = StateVector((np.ones(8, dtype=complex) / np.sqrt(8)).tolist())
+                theta = np.arcsin(np.sqrt(len(targets) / 8))
+                for r in range(7):
+                    probability = np.sum(np.abs(state.ndarray()[targets])**2)
+                    self.assertAlmostEqual(float(probability), np.sin((2*r+1)*theta)**2)
+                    state = state.evolve(program.to_circuit())
+        for size, solutions, rounds in ((8, 1, 2), (4, 1, 1), (8, 2, 1), (8, 4, 0), (8, 8, 0)):
+            self.assertEqual(first_peak(size, solutions), rounds)
+        for size, solutions in ((8, 0), (8, 9), (0, 0)):
+            with self.assertRaises(ValueError):
+                first_peak(size, solutions)
+        np.testing.assert_allclose(namespace["grover_theory"][:4],
+                                   [1/8, 25/32, 121/128, 169/512], atol=1e-12)
+
+    def test_qft_derivation_table_renders_with_ket_in_header(self):
+        from nbconvert import HTMLExporter
+
+        path = ROOT / "notebooks/day1/06_quantum_fourier_transform.ipynb"
+        nb = nbformat.read(path, as_version=4)
+        cells = [cell for cell in nb.cells if cell.cell_type == "markdown" and "A.3 从求和到张量积" in cell.source]
+        self.assertEqual(len(cells), 1)
+        html, _ = HTMLExporter().from_notebook_node(nbformat.v4.new_notebook(cells=cells))
+        # A literal | in the ket would be interpreted as an extra table column.
+        self.assertIn("<table>", html)
+        self.assertEqual(html.count("<tr>"), 6)
+        self.assertIn("CR(0, 2, pi/4)", html)
+
     def test_saved_notebooks_have_complete_execution_and_embedded_images(self):
         expected = {ROOT / f"notebooks/day{day}/{topic}.ipynb" for day, topics in TOPICS.items() for topic in topics}
         self.assertEqual(set((ROOT / "notebooks").glob("day*/*.ipynb")), expected)

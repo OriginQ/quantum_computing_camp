@@ -209,7 +209,7 @@ Claude Code、Codex、Gemini CLI 可在交互会话用 `/mcp` 查看连接；Cod
 | 03 | [量子云运行](notebooks/day1/03_quantum_cloud.ipynb) | 选择后端、提交线路和查询结果的可选云端流程 |
 | 04 | [隐形传态与动态线路](notebooks/day1/04_teleportation.ipynb) | 条件校正、Bob 测量概率及经典位序说明 |
 | 05 | [量子态制备与编码](notebooks/day1/05_state_encoding.ipynb) | 基础、角度、振幅、稀疏编码与态矢量 |
-| 06 | [量子傅里叶变换](notebooks/day1/06_quantum_fourier_transform.ipynb) | 用 H、受控旋转和 SWAP 构建三比特 QFT |
+| 06 | [量子傅里叶变换](notebooks/day1/06_quantum_fourier_transform.ipynb) | 三比特 QFT；末尾附录含酉性与门分解推导、相位和干涉实验 |
 
 ### 第二天：期望值与进阶算法
 
@@ -219,7 +219,7 @@ Claude Code、Codex、Gemini CLI 可在交互会话用 `/mcp` 查看连接；Cod
 | 02 | [变分量子线路](notebooks/day2/02_variational_circuits.ipynb) | 参数化 ansatz、经典优化与能量曲线 |
 | 03 | [含噪声模拟](notebooks/day2/03_noise_simulation.ipynb) | 门噪声、读出噪声和 Bell 偶校验概率 |
 | 04 | [量子加法器](notebooks/day2/04_quantum_adder.ipynb) | 半加器、全加器及默认 12 比特的 3 + 5 示例 |
-| 05 | [Grover 搜索](notebooks/day2/05_grover_search.ipynb) | oracle、扩散算子、本地搜索分布及可选云端运行 |
+| 05 | [Grover 搜索](notebooks/day2/05_grover_search.ipynb) | oracle、扩散算子及可选云端运行；末尾附录含二维旋转推导与迭代次数实验 |
 
 量子云相关 Notebook 默认 `RUN_ON_QCLOUD = False`，对应单元格保存的是明确的跳过提示，**不代表云端任务已执行**。需要真机任务时，在启动 Jupyter 前准备 `APIKEY` 环境变量，再手动开启；后端可用性和任务结果以实际返回为准。原第二天末尾空白的“AI工具”主题统一见[第 3 节](#3-配置-ai-编程助手)。
 
