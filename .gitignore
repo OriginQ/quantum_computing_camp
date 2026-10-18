@@ -1,2 +1,28 @@
 *.vs/*
+docs/pdf/*
 
+# Local environments, downloaded skills, credentials and verification artifacts
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+.tmp/
+.local-archives/
+.env
+.env.*
+.mcp.json
+mcp.json
+.codex/config.toml
+.claude/settings.local.json
+.claude/skills/qpanda3-programming/
+.agents/skills/qpanda3-programming/
+.codebuddy/skills/qpanda3-programming/
+/opencode.jsonc
+/opencode.json
+.opencode/skills/qpanda3-programming/
+.opencode/opencode.jsonc
+.opencode/opencode.json
+.agents/mcp.json
+.gemini/settings.json
+.gemini/skills/qpanda3-programming/
+.zcode/config.json
+.zcode/skills/qpanda3-programming/
