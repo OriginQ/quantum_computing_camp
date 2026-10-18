@@ -219,7 +219,7 @@ def check_tool_usable(tool: str, scope: str) -> bool:
         )
         return False
     try:
-        check_config_overrides(tool)
+        check_config_overrides(tool, scope)
     except ValueError:
         return False
     if tool == "codewhale" and scope == "project":
@@ -446,8 +446,8 @@ def validate_mcp_entries(entries):
 
 def client_paths(tool, scope):
     """Return the config and skill root in exactly one selected scope."""
-    check_config_overrides(tool)
-    root = Path(PROJECT_DIR) if scope == "project" else Path.home()
+    check_config_overrides(tool, scope)
+    root = Path(PROJECT_DIR) if scope == "project" else Path.home().resolve()
     if tool in ("claude", "codebuddy"):
         family = "claude" if tool == "claude" else "codebuddy"
         if scope == "project":
@@ -491,9 +491,9 @@ def client_paths(tool, scope):
     return root / config, root / skills
 
 
-def check_config_overrides(tool):
+def check_config_overrides(tool, scope):
     """Refuse unsupported alternate roots instead of reporting a false success."""
-    home = Path.home()
+    home = Path.home().resolve()
     defaults = {
         "codex": {"CODEX_HOME": home / ".codex"},
         "claude": {"CLAUDE_CONFIG_DIR": None},
@@ -506,7 +506,10 @@ def check_config_overrides(tool):
                       "DEEPSEEK_HOME": None, "DEEPSEEK_CONFIG_PATH": None},
         "codebuddy": {"CODEBUDDY_CONFIG_DIR": home / ".codebuddy"},
     }
+    user_root_only = {"CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"}
     for name, default in defaults.get(tool, {}).items():
+        if scope == "project" and name in user_root_only:
+            continue
         value = os.environ.get(name)
         if value and (default is None or Path(value).expanduser().resolve() != default.resolve()):
             log_error(f"{name} changes the configuration layout; use the client's manual configuration")
@@ -525,6 +528,15 @@ def guard_path(path, root):
             break
 
 
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
+
+
 def load_client_config(path):
     if not path.is_file():
         return {}
@@ -534,7 +546,13 @@ def load_client_config(path):
     else:
         text = path.read_text(encoding="utf-8-sig")
         try:
-            data = json5.loads(text, allow_duplicate_keys=False) if text.strip() else {}
+            if not text.strip():
+                data = {}
+            else:
+                try:
+                    data = stdjson.loads(text, object_pairs_hook=unique_json_object)
+                except stdjson.JSONDecodeError:
+                    data = json5.loads(text, allow_duplicate_keys=False)
         except Exception:
             # Parser exceptions can embed the original source text.
             raise ValueError("Invalid client JSON configuration") from None
@@ -646,17 +664,17 @@ def opencode_server_maps(data, create=False):
 
 def scope_configs(tool, scope, selected):
     if tool == "opencode":
-        base = Path(PROJECT_DIR) if scope == "project" else Path.home() / ".config/opencode"
+        base = Path(PROJECT_DIR) if scope == "project" else Path.home().resolve() / ".config/opencode"
         candidates = [base / name for name in ("opencode.json", "opencode.jsonc")]
         if scope == "project":
             candidates += [base / ".opencode" / name for name in ("opencode.json", "opencode.jsonc")]
         return list(dict.fromkeys([selected, *(p for p in candidates if p.exists())]))
     if tool == "codebuddy":
-        base = Path(PROJECT_DIR) if scope == "project" else Path.home()
+        base = Path(PROJECT_DIR) if scope == "project" else Path.home().resolve()
         names = (".mcp.json", "mcp.json") if scope == "project" else (".codebuddy/.mcp.json", ".codebuddy/mcp.json", ".codebuddy.json")
         return list(dict.fromkeys([selected, *(base / p for p in names if (base / p).exists())]))
     if tool == "zcode":
-        root = Path(PROJECT_DIR) if scope == "project" else Path.home()
+        root = Path(PROJECT_DIR) if scope == "project" else Path.home().resolve()
         fallback = root / ".agents/mcp.json"
         return [selected, *([fallback] if fallback.exists() else [])]
     return [selected]
@@ -722,7 +740,7 @@ def normalize_opencode_legacy(data):
 
 def prepare_client(tool, mcp_cfg, skill_url, scope):
     config, skills = client_paths(tool, scope)
-    root = Path(PROJECT_DIR) if scope == "project" else Path.home()
+    root = Path(PROJECT_DIR) if scope == "project" else Path.home().resolve()
     paths = scope_configs(tool, scope, config)
     for path in [*paths, skills]:
         guard_path(path, root)
@@ -784,7 +802,7 @@ def prepare_client(tool, mcp_cfg, skill_url, scope):
 def uninstall_tool(tool, scope, skill_only=False):
     config, skills = client_paths(tool, scope)
     target = skills / "qpanda3-programming"
-    root = Path(PROJECT_DIR) if scope == "project" else Path.home()
+    root = Path(PROJECT_DIR) if scope == "project" else Path.home().resolve()
     guard_path(target, root)
     changes = []
     paths = [] if skill_only else scope_configs(tool, scope, config)

@@ -41,7 +41,6 @@ uv --version
 仓库已设置 **Python 3.14**，运行时使用[南京大学镜像](https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone/)，Python 包使用[清华镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)，无需修改全局配置。
 
 ```powershell
-$env:UV_PYTHON_INSTALL_DIR = Join-Path $PWD '.tmp\uv-python'
 uv python install 3.14
 uv sync --upgrade-package pyqpanda3
 ```
@@ -50,7 +49,7 @@ uv sync --upgrade-package pyqpanda3
 
 日常通过 `uv run --locked` 使用已同步的环境，无需手动激活 `.venv`，也不会每次运行都升级包。为自己的练习添加其他包可用 `uv add 包名`。
 
-重新打开终端后，安装或更新 Python 前需再次设置上面的 `UV_PYTHON_INSTALL_DIR`。
+uv 缓存和托管 Python 使用 uv 默认的用户级目录，不随当前工作目录变化，也无需每次打开终端设置目录变量。可分别运行 `uv cache dir` 和 `uv python dir` 查询实际位置；已有的环境变量或用户级 uv 配置仍可能覆盖默认位置。
 
 ### 1.3 验证运行并打开 Notebook
 
@@ -114,9 +113,8 @@ quantum_computing_camp/
 │   └── test_training_notebooks.py     # Notebook 独立运行、输出与教学结果检查
 ├── docs/pdf/                         # 本地课程参考资料（可选）
 ├── .venv/                            # 生成：项目 Python 虚拟环境
-├── .tmp/                             # 生成：本地运行时、缓存和中间文件
-│   ├── uv-cache/                     # uv 包缓存
-│   └── uv-python/                    # .venv 依赖的 Python 运行时
+├── .tmp/                             # 生成：脚本与验证中间文件
+├── .local-archives/                  # 本地历史材料归档，不纳入 Git
 ├── .agents/                          # 生成：Codex Skill
 ├── .claude/                          # 生成：Claude Code Skill
 ├── .codex/                           # 生成：Codex 配置
@@ -126,7 +124,7 @@ quantum_computing_camp/
 └── .zcode/                           # 生成：ZCode 配置与 Skill
 ```
 
-客户端目录按需生成，MCP 文件和 Skill 的具体位置统一见 3.3；脚本生成的项目配置和 Skill 已加入 `.gitignore`。`.tmp/uv-python/` 仍被 `.venv` 使用，环境使用期间请勿删除；脚本下载的 ZIP 和解压中间文件也放在 `.tmp/`，正常退出时清理。
+客户端目录按需生成，MCP 文件和 Skill 的具体位置统一见 3.3；脚本生成的项目配置和 Skill 已加入 `.gitignore`。uv 缓存和 Python 运行时位于用户级目录；脚本下载的 ZIP 和解压中间文件放在 `.tmp/`，正常退出时清理。
 
 ## 3. 配置 AI 编程助手
 
@@ -242,7 +240,6 @@ Claude Code、Codex、Gemini CLI 可在交互会话用 `/mcp` 查看连接；Cod
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 cd /你的路径/quantum_computing_camp
-export UV_PYTHON_INSTALL_DIR="$PWD/.tmp/uv-python"
 uv python install 3.14
 uv sync --upgrade-package pyqpanda3
 ```
@@ -267,7 +264,7 @@ uv run --locked python scripts/prepare_qpanda3_ai_kits.py --help
 - 相比原版，默认作用域改为项目级，项目根取当前目录或 `--project-dir`，不再取脚本目录。以前的用户级配置和旧 `.codex/skills/` 不自动迁移或删除；Codex 当前使用 `.agents/skills/`。显式指定客户端可预先生成配置，无需通过自动检测；卸载必须指定单个客户端，不再批量跨作用域清理。
 - OpenCode 会同步更新本作用域兼容文件里已有的同名服务；ZCode 首次写入原生 MCP 时会保留原先有效的 `.agents/mcp.json` 服务；Claude 新建 `.mcp.json` 时保留 CodeBuddy 原 `mcp.json` 中的服务。Codewhale 不要求或改写 `constitution.json`。
 - `uninstall 客户端参数` 只清理所选作用域兼容配置中的 `qpanda3-runtime` 和默认 Skill `qpanda3-programming`，自定义名称需手动处理。Claude 和 CodeBuddy 共用 `.mcp.json` 时，删除 MCP 会同时影响两者；加 `--skill-only` 可只卸载该客户端的默认 Skill。
-- 检测到不支持的配置根覆盖（如 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`GEMINI_CLI_HOME`、`XDG_CONFIG_HOME`、`OPENCODE_CONFIG*`、`CLINE_*`、`CODEWHALE_HOME`）时，脚本会明确拒绝，请按客户端说明手动配置；CLI 单次覆盖或组织策略仍需在客户端核查。配置或 Skill 经过符号链接／目录联接时也需手动处理。
+- 用户级配置检测到不支持的配置根覆盖（如 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`GEMINI_CLI_HOME`、`XDG_CONFIG_HOME`、`OPENCODE_CONFIG*`、`CLINE_*`、`CODEWHALE_HOME`）时，脚本会明确拒绝，请按客户端说明手动配置。项目级忽略仅改变用户根目录的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和 `XDG_CONFIG_HOME`；其余覆盖检查保留，CLI 单次覆盖或组织策略仍需在客户端核查。用户 HOME 本身或其父目录可以是符号链接／目录联接，脚本以解析后的真实目录为根；根以下的配置或 Skill 路径经过链接时仍需手动处理。
 - 使用 `--api-key-env` 时，Claude、Codex、CodeBuddy 可引用环境变量；CodeBuddy 变量名必须匹配 `[A-Z_][A-Z0-9_]*`。本地 JSON 输入、自定义 Skill 路径或其他仓库不会自动获得本仓库的忽略保护，含密钥的输入建议放 `.tmp/`。
 
 下载、解压和恢复备份存于仓库 `.tmp/`。配置先完整序列化，再用同目录的短期临时文件原子替换，以支持跨盘用户配置；Skill 复制或配置写入报错时尝试恢复旧内容。若恢复也失败，脚本会输出保留在 `.tmp/` 的恢复路径；Skill 复制不保证断电时的原子性。

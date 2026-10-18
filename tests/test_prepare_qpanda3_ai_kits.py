@@ -681,12 +681,80 @@ class SetupTests(unittest.TestCase):
     def test_custom_root_overrides_fail_before_default_paths_are_written(self):
         cases = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR", "gemini": "GEMINI_CLI_HOME", "opencode": "OPENCODE_CONFIG_DIR", "cline": "CLINE_MCP_SETTINGS_PATH", "codewhale": "CODEWHALE_HOME"}
         for tool, name in cases.items():
-            scope = "project" if tool in PROJECT_LAYOUTS else "user"
+            scope = "user"
             with self.subTest(tool=tool), patch.dict(os.environ, {name: str(self.base / "custom")}):
                 with self.assertRaises(ValueError):
                     self.prepare_literal(tool, scope)
         self.assertEqual(list(self.project.iterdir()), [])
         self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_project_scope_ignores_user_root_overrides(self):
+        cases = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR", "opencode": "XDG_CONFIG_HOME"}
+        for tool, name in cases.items():
+            with self.subTest(tool=tool), patch.dict(os.environ, {name: str(self.base / "custom")}):
+                self.prepare_literal(tool)
+                config, skills = self.expected_paths(tool, "project")
+                self.assertTrue(config.is_file())
+                self.assertTrue((skills / "qpanda3-programming/SKILL.md").is_file())
+                with patch.object(kit.shutil, "which", return_value="fixture-client"):
+                    self.assertTrue(kit.check_tool_usable(tool, "project"))
+                self.run_main("uninstall", tool)
+                self.assertNotIn("qpanda3-runtime", servers_for(tool, kit.load_client_config(config)))
+        self.assertFalse((self.base / "custom").exists())
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_project_scope_still_rejects_opencode_injected_config(self):
+        for name in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"):
+            with self.subTest(name=name), patch.dict(os.environ, {name: "custom"}):
+                with self.assertRaises(ValueError):
+                    self.prepare_literal("opencode")
+
+    def test_user_scope_accepts_linked_home_and_linked_home_parent(self):
+        link = self.base / "home-link"
+        self.make_directory_link(link, self.home)
+        nested = self.home / "nested"
+        nested.mkdir()
+        for home, actual in ((link, self.home), (link / "nested", nested)):
+            with self.subTest(home=home), patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+                for tool in USER_LAYOUTS:
+                    self.prepare_literal(tool, "user")
+                    config, skills = USER_LAYOUTS[tool]
+                    self.assertTrue((actual / config).is_file())
+                    self.assertTrue((actual / skills / "qpanda3-programming/SKILL.md").is_file())
+                    self.run_main("uninstall", tool, "--user")
+                    self.assertNotIn("qpanda3-runtime", servers_for(tool, kit.load_client_config(actual / config)))
+
+    def test_large_standard_json_uses_fast_parser_without_losing_data(self):
+        config = self.home / ".claude.json"
+        data = {"history": ["x" * 100 for _ in range(10000)], "nested": {"keep": True}}
+        write_fixture(config, data)
+        # This boundary check avoids a machine-dependent timing threshold.
+        with patch.object(kit.json5, "loads", side_effect=AssertionError("JSON5 slow path")):
+            self.assertEqual(kit.load_client_config(config), data)
+
+    def test_linked_home_does_not_allow_linked_config_below_root(self):
+        link = self.base / "home-link"
+        outside = self.base / "outside"
+        outside.mkdir()
+        self.make_directory_link(link, self.home)
+        self.make_directory_link(self.home / ".codex", outside)
+        config = outside / "config.toml"
+        write_fixture(config, config_fixture("codex"))
+        before = config.read_bytes()
+        with patch.dict(os.environ, {"HOME": str(link), "USERPROFILE": str(link)}):
+            with self.assertRaises(ValueError):
+                self.prepare_literal("codex", "user")
+            with self.assertRaises(ValueError):
+                self.run_main("uninstall", "codex", "--user")
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_json_and_json5_duplicate_keys_remain_rejected(self):
+        config = self.project / "config.json"
+        for source in ('{"nested":{"secret":1,"secret":2}}', '{/* comment */ nested: {secret: 1, secret: 2}}'):
+            with self.subTest(source=source):
+                config.write_text(source, encoding="utf8")
+                with self.assertRaisesRegex(ValueError, "^Invalid client JSON configuration$"):
+                    kit.load_client_config(config)
 
     def test_codebuddy_lowercase_environment_name_is_rejected(self):
         with patch.dict(os.environ, {"review_lowercase": "fixture"}), self.assertRaises(SystemExit):

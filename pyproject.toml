@@ -15,7 +15,6 @@ dev = [
 
 [tool.uv]
 package = false
-cache-dir = ".tmp/uv-cache"
 python-install-mirror = "https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone"
 
 [[tool.uv.index]]
